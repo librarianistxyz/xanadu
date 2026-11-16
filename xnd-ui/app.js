@@ -1290,7 +1290,7 @@ function renderSearchResults(query, activeTab, data, isLoadingExternal = false) 
     ["all", `All`],
     ["web", `Web (${senses.length + items.length})`],
     ["images", `Images (${images.length})`],
-    ["forums", `Forums (${forums.length})`],
+    ...(forums.length ? [["forums", `Forums (${forums.length})`]] : []),
     ["news", `News`],
   ]
     .map(
@@ -1496,7 +1496,7 @@ function renderSearchResults(query, activeTab, data, isLoadingExternal = false) 
     bodyContent = `
       <div class="search-layout">
         <div class="search-main">${knowledgeCardHtml}${alternativesHtml}${deepPassagesHtml}${sensesHtml || `<p style="color:var(--muted);">No web knowledge results matched "${escapeHtml(query)}".</p>`}</div>
-        <aside class="desktop-aside">${xndSideHtml}</aside>
+        ${items.length ? `<aside class="desktop-aside">${xndSideHtml}</aside>` : ""}
       </div>`;
   } else {
     bodyContent = `
@@ -1506,10 +1506,9 @@ function renderSearchResults(query, activeTab, data, isLoadingExternal = false) 
           ${alternativesHtml}
           ${deepPassagesHtml}
           ${sensesHtml}
-          ${forumsHtml}
           ${imagesHtml}
         </div>
-        <aside class="desktop-aside">${xndSideHtml}</aside>
+        ${items.length ? `<aside class="desktop-aside">${xndSideHtml}</aside>` : ""}
       </div>`;
   }
 

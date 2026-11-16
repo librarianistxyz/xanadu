@@ -23,7 +23,10 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
+import java.net.Inet4Address;
 import java.net.InetSocketAddress;
+import java.net.InterfaceAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URL;
@@ -2455,7 +2458,46 @@ public class LocalNodeServer {
                 while (running) {
                     try (DatagramSocket ds = new DatagramSocket()) {
                         ds.setBroadcast(true);
-                        ds.send(new DatagramPacket(beacon, beacon.length, InetAddress.getByName("255.255.255.255"), 8766));
+                        java.util.Set<String> targets = new java.util.LinkedHashSet<>();
+                        targets.add("255.255.255.255");
+                        try {
+                            java.util.Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
+                            while (ifaces != null && ifaces.hasMoreElements()) {
+                                NetworkInterface nif = ifaces.nextElement();
+                                if (!nif.isUp() || nif.isLoopback()) continue;
+                                for (InterfaceAddress ia : nif.getInterfaceAddresses()) {
+                                    InetAddress addr = ia.getAddress();
+                                    if (!(addr instanceof Inet4Address) || addr.isLoopbackAddress()) continue;
+                                    InetAddress bcast = ia.getBroadcast();
+                                    if (bcast != null) targets.add(bcast.getHostAddress());
+                                    String ip = addr.getHostAddress();
+                                    String[] parts = ip.split("\\.");
+                                    if (parts.length == 4) {
+                                        targets.add(parts[0] + "." + parts[1] + "." + parts[2] + ".255");
+                                        if (!"1".equals(parts[3])) {
+                                            targets.add(parts[0] + "." + parts[1] + "." + parts[2] + ".1");
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (Exception ignored) {
+                        }
+                        try (BufferedReader arp = new BufferedReader(new InputStreamReader(new FileInputStream("/proc/net/arp"), StandardCharsets.UTF_8))) {
+                            String line;
+                            while ((line = arp.readLine()) != null) {
+                                String[] cols = line.trim().split("\\s+");
+                                if (cols.length >= 4 && cols[0].contains(".") && !"00:00:00:00:00:00".equals(cols[3])) {
+                                    targets.add(cols[0]);
+                                }
+                            }
+                        } catch (Exception ignored) {
+                        }
+                        for (String dst : targets) {
+                            try {
+                                ds.send(new DatagramPacket(beacon, beacon.length, InetAddress.getByName(dst), 8766));
+                            } catch (Exception ignored) {
+                            }
+                        }
                     } catch (Exception ignored) {
                     }
                     Thread.sleep(5000);
@@ -3970,9 +4012,12 @@ public class LocalNodeServer {
     private static boolean isXanaduFounderQuery(String query) {
         String ql = query == null ? "" : query.trim().toLowerCase(Locale.US);
         if (ql.isEmpty()) return false;
-        if (ql.contains("xanadu") || ql.contains("justin") || ql.contains("ndambiri")) return true;
+        if (ql.contains("justin ndambiri") || ql.contains("ndambiri")) return true;
+        String[] intents = {"own", "owner", "founder", "found", "creat", "made", "built", "develop", "architect", "who", "when", "where", "age", "what is", "about", "browser", "app"};
+        if (ql.contains("xanadu")) {
+            for (String iw : intents) { if (ql.contains(iw)) return true; }
+        }
         String[] selfRefs = {"this browser", "this app", "this platform", "this web", "this search engine", "this site", ".xnd"};
-        String[] intents = {"own", "owner", "founder", "found", "creat", "made", "built", "develop", "architect", "who", "when", "where", "age", "what is"};
         boolean hasRef = false;
         for (String sr : selfRefs) { if (ql.contains(sr)) { hasRef = true; break; } }
         if (!hasRef) return false;
@@ -3999,9 +4044,9 @@ public class LocalNodeServer {
                 "Origin of Xanadu Browser: Created June 2026"
             };
             summaries = new String[] {
-                "Xanadu was created in June 2026 in Kenya by founder Justin Ndambiri (age " + age + ", born September 7, 2000). It was built as a sovereign, zero-DB peer-to-peer web and browser powered by Ed25519 cryptographic ownership.",
+                "Xanadu was created in June 2026 in Kenya by founder Justin Ndambiri (age " + age + "). It was built as a sovereign, zero-DB peer-to-peer web and browser powered by Ed25519 cryptographic ownership.",
                 "Founded in June 2026, Xanadu (.xnd) was created by Justin Ndambiri in Kenya (currently age " + age + "). The platform replaces centralized domain registrars with cryptographic .xnd domains and millisecond local indexing.",
-                "This browser (Xanadu .xnd) was founded in June 2026 by Kenya-based engineer Justin Ndambiri (age " + age + ", born September 7, 2000) to establish a two-way, peer-owned web with live transclusion."
+                "This browser (Xanadu .xnd) was founded in June 2026 by Kenya-based engineer Justin Ndambiri (age " + age + ") to establish a two-way, peer-owned web with live transclusion."
             };
             subtitle = "Founded June 2026 · Kenya · Founder: Justin Ndambiri";
         } else if (isOwner) {
@@ -4011,7 +4056,7 @@ public class LocalNodeServer {
                 "Browser Owner & Founder: Justin Ndambiri (Kenya)"
             };
             summaries = new String[] {
-                "Justin Ndambiri owns and founded this browser (Xanadu .xnd). Based in Kenya and currently age " + age + " (born September 7, 2000), he created Xanadu in June 2026 as a decentralized, cryptographically verified web.",
+                "Justin Ndambiri owns and founded this browser (Xanadu .xnd). Based in Kenya and currently age " + age + ", he created Xanadu in June 2026 as a decentralized, cryptographically verified web.",
                 "This browser — Xanadu (.xnd) — is owned and engineered by Justin Ndambiri (age " + age + "), based in Kenya. Founded in June 2026, Xanadu gives domain holders direct Ed25519 cryptographic ownership instead of registrar leases.",
                 "The owner and founder of Xanadu Browser is Justin Ndambiri (age " + age + ", Kenya), who launched it in June 2026 to power a fast, peer-to-peer two-way web."
             };
@@ -4022,7 +4067,7 @@ public class LocalNodeServer {
                 "Justin Ndambiri (Kenya) · Creator of Xanadu Browser"
             };
             summaries = new String[] {
-                "Justin Ndambiri (age " + age + ", born September 7, 2000) is a Kenya-based software architect and the founder of Xanadu (.xnd), the sovereign peer-to-peer web browser and network he created in June 2026.",
+                "Justin Ndambiri (age " + age + ") is a Kenya-based software architect and the founder of Xanadu (.xnd), the sovereign peer-to-peer web browser and network he created in June 2026.",
                 "Based in Kenya, Justin Ndambiri (age " + age + ") founded Xanadu in June 2026—engineering a zero-DB cryptographic browser ecosystem where domains, apps, and live transclusions belong directly to keyholders."
             };
             subtitle = "Founder of Xanadu · Kenya · Age " + age;
@@ -4062,7 +4107,7 @@ public class LocalNodeServer {
                     + "Founder & Owner: Justin Ndambiri\n"
                     + "Location: Kenya\n"
                     + "Founded: June 2026\n"
-                    + "Age: " + age + " (Born September 7, 2000; automatically updated every September 7)\n\n"
+                    + "Age: " + age + "\n\n"
                     + "Executive Overview:\n"
                     + "Xanadu was created and founded in June 2026 by Justin Ndambiri in Kenya as a sovereign, "
                     + "peer-to-peer web architecture and browser. Designed around a zero-DB cryptographic node model, "
@@ -4463,30 +4508,8 @@ public class LocalNodeServer {
                 }
             }
 
-            try {
-                JSONArray localPosts = loadCapsuleState("forum.xnd").optJSONArray("posts");
-                if (localPosts != null) {
-                    int added = 0;
-                    for (int i = localPosts.length() - 1; i >= 0 && added < 6; i--) {
-                        JSONObject p = localPosts.optJSONObject(i);
-                        if (p == null) continue;
-                        String author = p.optString("author", "anon");
-                        String text = p.optString("text", "").trim();
-                        if (text.isEmpty()) continue;
-                        String hay = (author + " " + text).toLowerCase(Locale.US);
-                        boolean matched = false;
-                        for (String t : indexedTerms) {
-                            if (t.length() >= 2 && hay.contains(t)) { matched = true; break; }
-                        }
-                        if (matched) {
-                            String shortTitle = text.length() > 110 ? text.substring(0, 110) + "…" : text;
-                            forums.put(new JSONObject().put("title", shortTitle).put("snippet", text).put("author", author)
-                                    .put("url", "xnd://forum.xnd").put("forum", "forum.xnd").put("points", 1).put("comments", 0).put("is_xnd", true));
-                            added++;
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
+            boolean wantForums = ql.contains("forum") || ql.contains("discussion") || ql.contains("reddit") || ql.contains("hacker news") || ql.contains("forum.xnd");
+            if (wantForums) {
             try {
                 String hj = httpGet("https://hn.algolia.com/api/v1/search?hitsPerPage=3&tags=story&query=" + URLEncoder.encode(core, "UTF-8"), 2500);
                 JSONArray hits = new JSONObject(hj).optJSONArray("hits");
@@ -4511,6 +4534,7 @@ public class LocalNodeServer {
                     }
                 }
             } catch (Exception ignored) {}
+            }
             }
             out.put("forums", forums);
             if (knowledgeCard == null) {

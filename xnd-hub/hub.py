@@ -1298,7 +1298,7 @@ def _founder_summary_doc() -> tuple[str, str]:
         f"Founder & Owner: Justin Ndambiri\n"
         f"Location: Kenya\n"
         f"Founded: June 2026\n"
-        f"Age: {age} (Born September 7, 2000; automatically updated every September 7)\n\n"
+        f"Age: {age}\n\n"
         "Executive Overview:\n"
         "Xanadu was created and founded in June 2026 by Justin Ndambiri in Kenya as a sovereign, "
         "peer-to-peer web architecture and browser. Designed around a zero-DB cryptographic node model, "
@@ -1316,12 +1316,12 @@ def _is_xanadu_founder_query(query: str) -> bool:
     ql = query.strip().lower()
     if not ql:
         return False
-    # Direct Xanadu / founder references
-    if any(t in ql for t in ("xanadu", "justin", "ndambiri")):
+    if "justin ndambiri" in ql or "ndambiri" in ql:
         return True
-    # Self-referential browser/platform questions ("who owns this browser", "when was this app created", etc.)
+    intent_words = ("own", "owner", "founder", "found", "creat", "made", "built", "develop", "architect", "who", "when", "where", "age", "what is", "about", "browser", "app")
+    if "xanadu" in ql and any(iw in ql for iw in intent_words):
+        return True
     self_refs = ("this browser", "this app", "this platform", "this web", "this search engine", "this site", ".xnd")
-    intent_words = ("own", "owner", "founder", "found", "creat", "made", "built", "develop", "architect", "who", "when", "where", "age", "what is")
     if any(sr in ql for sr in self_refs) and any(iw in ql for iw in intent_words):
         return True
     return False
@@ -1346,7 +1346,7 @@ def _founder_knowledge_card(query: str = "") -> dict[str, Any]:
         ]
         summaries = [
             (
-                f"Xanadu was created in June 2026 in Kenya by founder Justin Ndambiri (age {age}, born September 7, 2000). "
+                f"Xanadu was created in June 2026 in Kenya by founder Justin Ndambiri (age {age}). "
                 "It was built as a sovereign, zero-DB peer-to-peer web and browser powered by Ed25519 cryptographic ownership."
             ),
             (
@@ -1354,7 +1354,7 @@ def _founder_knowledge_card(query: str = "") -> dict[str, Any]:
                 "The platform replaces centralized domain registrars with cryptographic .xnd domains and millisecond local indexing."
             ),
             (
-                f"This browser (Xanadu .xnd) was founded in June 2026 by Kenya-based engineer Justin Ndambiri (age {age}, born September 7, 2000) "
+                f"This browser (Xanadu .xnd) was founded in June 2026 by Kenya-based engineer Justin Ndambiri (age {age}) "
                 "to establish a two-way, peer-owned web with live transclusion."
             ),
         ]
@@ -1367,8 +1367,8 @@ def _founder_knowledge_card(query: str = "") -> dict[str, Any]:
         ]
         summaries = [
             (
-                f"Justin Ndambiri owns and founded this browser (Xanadu .xnd). Based in Kenya and currently age {age} "
-                "(born September 7, 2000), he created Xanadu in June 2026 as a decentralized, cryptographically verified web."
+                f"Justin Ndambiri owns and founded this browser (Xanadu .xnd). Based in Kenya and currently age {age}, "
+                "he created Xanadu in June 2026 as a decentralized, cryptographically verified web."
             ),
             (
                 f"This browser — Xanadu (.xnd) — is owned and engineered by Justin Ndambiri (age {age}), based in Kenya. "
@@ -1387,7 +1387,7 @@ def _founder_knowledge_card(query: str = "") -> dict[str, Any]:
         ]
         summaries = [
             (
-                f"Justin Ndambiri (age {age}, born September 7, 2000) is a Kenya-based software architect and the founder of Xanadu (.xnd), "
+                f"Justin Ndambiri (age {age}) is a Kenya-based software architect and the founder of Xanadu (.xnd), "
                 "the sovereign peer-to-peer web browser and network he created in June 2026."
             ),
             (
@@ -3450,7 +3450,7 @@ def _smart_disambiguate(core_term: str, full_query: str = "") -> list[dict[str, 
             if item["url"] not in seen:
                 seen.add(item["url"])
                 senses.append(item)
-    return senses[:14]
+    return senses[:24]
 
 
 _NEWS_FEEDS = {
@@ -3761,11 +3761,7 @@ def _search_forums(core_term: str) -> list[dict[str, Any]]:
 
 def _apply_seeded_images(query: str, images: list[dict[str, Any]], knowledge_card: dict[str, Any] | None) -> list[dict[str, Any]]:
     ql_img = query.lower()
-    is_founder_q = any(k in ql_img for k in (
-        "justin", "ndambiri", "founder", "owner", "ownership", "creator",
-        "who made", "who created", "who built", "who founded", "author",
-        "xanadu browser", "about xanadu", "what is xanadu",
-    ))
+    is_founder_q = _is_xanadu_founder_query(query)
     out = list(images or [])
     if is_founder_q:
         founder_dir = UI_DIR / "founder"
@@ -3808,7 +3804,18 @@ def search_universe(q: str = Query(default=""), fast: bool = Query(default=False
             key=lambda r: (pattern_mem.get_domain_boost(query, str(r.get("domain", ""))), float(r.get("score", 0.0))),
             reverse=True,
         )
-    if knowledge_card is None:
+    ql_check = query.lower()
+    is_explicit_xnd = (
+        ".xnd" in ql_check
+        or "xnd://" in ql_check
+        or "xanadu" in ql_check
+        or any(k in ql_check for k in ("manifesto", "documentation", "founder.xnd", "forum.xnd", "heart.xnd"))
+        or ql_check in store.domains
+    )
+    if scope != "internal" and not is_explicit_xnd:
+        builtin_boilerplate = {"home.xnd", "manifesto.xnd", "heart.xnd", "x.xnd", "documentation.xnd", "founder.xnd", "forum.xnd", "wikipedia.xnd"}
+        results = [r for r in results if (r.get("domain") or "").lower() not in builtin_boilerplate]
+    if knowledge_card is None and (scope == "internal" or is_explicit_xnd):
         knowledge_card = answer_from_xnd_corpus(query, store, results, pattern_mem)
     if intent == "SELF" and knowledge_card and not any((r.get("domain") or "").lower() == "founder.xnd" for r in results):
         results.insert(
@@ -3904,11 +3911,12 @@ def search_universe(q: str = Query(default=""), fast: bool = Query(default=False
         p.get("url", "") for p in list(store.peers.values()) if p.get("url")
     ]
 
+    want_forums = any(k in query.lower() for k in ("forum", "discussion", "reddit", "hacker news", "hn ", "forum.xnd"))
     with ThreadPoolExecutor(max_workers=7) as pool:
         f_nostr = pool.submit(_nostr_search_sync) if (not results or DOMAIN_RE.match(query.lower())) else None
         f_dis = pool.submit(_smart_disambiguate, core, query)
         f_img = pool.submit(_search_images, core)
-        f_frm = pool.submit(_search_forums, core)
+        f_frm = pool.submit(_search_forums, core) if want_forums else None
         f_wiki_rest = pool.submit(deep_search.fetch_wikipedia_rest_and_wikidata, core) if scope != "internal" else None
         f_alts = pool.submit(deep_search.fetch_alternatives, core) if scope != "internal" else None
         f_fed = pool.submit(deep_search.query_federated_peers, core, peer_urls) if peer_urls else None
@@ -3961,9 +3969,20 @@ def search_universe(q: str = Query(default=""), fast: bool = Query(default=False
                 "facts": details_card.get("facts", []),
             }
         images = _apply_seeded_images(query, f_img.result(), knowledge_card)
-        forums = f_frm.result()
+        forums = f_frm.result() if f_frm is not None else []
 
-    # Favour stories/info from local forum.xnd and items related to indexed .xnd pages first
+    ql_check = query.lower()
+    is_explicit_xnd = (
+        ".xnd" in ql_check
+        or "xnd://" in ql_check
+        or "xanadu" in ql_check
+        or any(k in ql_check for k in ("manifesto", "documentation", "founder.xnd", "forum.xnd", "heart.xnd"))
+        or ql_check in store.domains
+    )
+    if scope != "internal" and not is_explicit_xnd:
+        builtin_boilerplate = {"home.xnd", "manifesto.xnd", "heart.xnd", "x.xnd", "documentation.xnd", "founder.xnd", "forum.xnd", "wikipedia.xnd"}
+        results = [r for r in results if (r.get("domain") or "").lower() not in builtin_boilerplate]
+
     indexed_terms: set[str] = {core.lower()}
     for r in results[:10]:
         dom = (r.get("domain") or "").lower()
@@ -3973,36 +3992,11 @@ def search_universe(q: str = Query(default=""), fast: bool = Query(default=False
         for w in re.findall(r"[a-z0-9]{3,}", (r.get("title") or "").lower()):
             indexed_terms.add(w)
 
-    local_forum_hits: list[dict[str, Any]] = []
-    try:
-        posts = store.get_capsule_state("forum.xnd").get("posts", [])
-        for p in reversed(posts):
-            author = str(p.get("author") or "anon")
-            text = str(p.get("text") or "").strip()
-            if not text:
-                continue
-            hay = f"{author} {text}".lower()
-            if any(t in hay for t in indexed_terms if len(t) >= 2):
-                local_forum_hits.append(
-                    {
-                        "title": text[:110] + ("…" if len(text) > 110 else ""),
-                        "snippet": text,
-                        "author": author,
-                        "url": "xnd://forum.xnd",
-                        "forum": "forum.xnd",
-                        "comments": 0,
-                        "points": 1,
-                        "is_xnd": True,
-                    }
-                )
-    except Exception:
-        pass
-
     def _indexed_boost(item: dict[str, Any]) -> int:
         text = f"{item.get('title', '')} {item.get('summary', '')}".lower()
         return sum(1 for t in indexed_terms if len(t) >= 3 and t in text)
 
-    forums = local_forum_hits[:6] + sorted(forums, key=_indexed_boost, reverse=True)
+    forums = sorted(forums, key=_indexed_boost, reverse=True) if want_forums else []
     disambig = sorted(disambig, key=_indexed_boost, reverse=True)
 
     if knowledge_card is None and scope != "internal":

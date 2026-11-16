@@ -658,6 +658,44 @@ body {
   font-size: 20px;
 }
 
+#sync-modal .modal-card {
+  width: min(820px, 94vw);
+  max-height: 84vh;
+  border-radius: 6px;
+  padding: 0 24px 20px;
+}
+
+#sync-modal .modal-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background-color: var(--bg);
+  padding: 16px 0 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.22);
+  gap: 12px;
+}
+
+.modal-close-btn {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background-color: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.modal-close-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .modal-card label {
   display: block;
   font-family: var(--font-mono);

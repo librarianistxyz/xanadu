@@ -595,12 +595,33 @@ def start_lan_discovery(http_port: int, on_peer_found: Any, label: str = "Xanadu
                     seen_ips.add(ip)
             except Exception:
                 pass
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if ip and not ip.startswith("127."):
+                    seen_ips.add(ip)
+        except Exception:
+            pass
         for ip in seen_ips:
             parts = ip.split(".")
             if len(parts) == 4:
                 bcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
                 if bcast not in targets:
                     targets.append(bcast)
+                if parts[3] != "1":
+                    gw = f"{parts[0]}.{parts[1]}.{parts[2]}.1"
+                    if gw not in targets:
+                        targets.append(gw)
+        # Also send direct unicast to known LAN/hotspot ARP neighbors in case broadcast packets are dropped
+        try:
+            with open("/proc/net/arp", "r", encoding="utf-8", errors="ignore") as f:
+                for line in f.readlines()[1:]:
+                    cols = line.split()
+                    if len(cols) >= 4 and "." in cols[0] and cols[3] != "00:00:00:00:00:00":
+                        if cols[0] not in targets:
+                            targets.append(cols[0])
+        except Exception:
+            pass
         return targets
 
     def _broadcaster() -> None:
