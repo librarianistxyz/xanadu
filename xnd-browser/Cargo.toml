@@ -1,0 +1,5 @@
+[package]
+name = "xnd-browser"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone native launcher for Xanadu Browser (.xnd Universe)"

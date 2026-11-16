@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Xanadu (.xnd) Decentralized Web",
+  "version": "0.1.0",
+  "description": "Resolve and view decentralized .xnd websites directly from Nostr kind:30078 events or your local Xanadu node.",
+  "permissions": [
+    "tabs",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*"
+  ],
+  "omnibox": {
+    "keyword": "xnd"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Xanadu (.xnd)"
+  }
+}

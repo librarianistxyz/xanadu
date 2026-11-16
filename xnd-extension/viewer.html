@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Xanadu (.xnd) Viewer</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0b1120; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; display: flex; flex-direction: column; }
+    #topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 14px; background: #0f172a; border-bottom: 1px solid #334155; font-size: 12px; }
+    .left { display: flex; align-items: center; gap: 10px; }
+    .badge { background: #1e293b; color: #38bdf8; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+    .cta { background: #2563eb; color: #fff; padding: 5px 10px; border-radius: 6px; text-decoration: none; font-weight: 600; }
+    #status { padding: 24px; font-size: 14px; color: #94a3b8; }
+    #site-frame { flex: 1; width: 100%; border: none; background: #fff; display: none; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <div class="left">
+      <strong id="dom-label">Loading .xnd...</strong>
+      <span id="badge" class="badge">Resolving via Nostr</span>
+    </div>
+    <a class="cta" href="https://github.com/xanadu-net/xanadu/releases" target="_blank" rel="noopener">Install Xanadu Node App</a>
+  </div>
+  <div id="status">Querying Nostr relays (kind:30078)...</div>
+  <iframe id="site-frame" sandbox="allow-scripts allow-forms allow-popups"></iframe>
+  <script src="viewer.js"></script>
+</body>
+</html>

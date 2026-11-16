@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Wrangler-style CLI for Xanadu capsules, secrets, and deployments."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import getpass
+import json
+import mimetypes
+import os
+from pathlib import Path
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+DEFAULT_HUB_URL = "http://127.0.0.1:8765"
+CLI_CONFIG_PATH = Path.home() / ".xanadu" / "cli.json"
+MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024
+IGNORED_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".next"}
+
+
+def _load_cli_config() -> dict:
+    if not CLI_CONFIG_PATH.exists():
+        return {}
+    try:
+        data = json.loads(CLI_CONFIG_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_cli_config(cfg: dict) -> None:
+    CLI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CLI_CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    os.chmod(CLI_CONFIG_PATH, 0o600)
+
+
+def _load_project_manifest(project_dir: Path) -> dict:
+    manifest_path = project_dir / "xanadu.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        raise SystemExit(f"Invalid xanadu.json: {exc}") from exc
+
+
+def _resolve_hub_url(args: argparse.Namespace) -> str:
+    cfg = _load_cli_config()
+    hub = getattr(args, "hub", None) or os.environ.get("XND_HUB_URL") or cfg.get("hub_url") or DEFAULT_HUB_URL
+    return str(hub).rstrip("/")
+
+
+def _resolve_domain(args: argparse.Namespace, project_dir: Path | None = None) -> str:
+    cfg = _load_cli_config()
+    manifest = _load_project_manifest(project_dir) if project_dir else {}
+    domain = getattr(args, "domain", None) or manifest.get("domain") or cfg.get("domain")
+    if not domain:
+        raise SystemExit("Missing domain. Pass --domain, set 'domain' in xanadu.json, or run `xnd login --domain <dom>`.")
+    return str(domain).strip().lower()
+
+
+def _http_json(method: str, url: str, payload: dict | None = None) -> dict:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"HTTP {exc.code} from {url}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"Failed to reach {url}: {exc.reason}") from exc
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    cfg = _load_cli_config()
+    hub_url = (args.hub or cfg.get("hub_url") or DEFAULT_HUB_URL).rstrip("/")
+    cfg["hub_url"] = hub_url
+
+    if args.domain:
+        cfg["domain"] = args.domain.strip().lower()
+
+    privkey = args.privkey
+    if args.prompt_privkey and not privkey:
+        privkey = getpass.getpass("Xanadu private key hex (leave blank to skip): ").strip()
+    if privkey:
+        cfg["privkey_hex"] = privkey.strip()
+
+    if args.claim_token:
+        cfg["claim_token"] = args.claim_token.strip()
+
+    # Verify hub reachability without failing if offline when --no-verify is passed.
+    if not args.no_verify:
+        health = _http_json("GET", f"{hub_url}/api/health")
+        if not health.get("ok"):
+            raise SystemExit(f"Hub health check failed: {health}")
+
+    _save_cli_config(cfg)
+    print(f"Saved Xanadu CLI config to {CLI_CONFIG_PATH}")
+    print(f"  hub_url: {cfg['hub_url']}")
+    if cfg.get("domain"):
+        print(f"  domain:  {cfg['domain']}")
+    if cfg.get("privkey_hex"):
+        print("  privkey: configured (0600)")
+    return 0
+
+
+def cmd_secret_put(args: argparse.Namespace) -> int:
+    hub_url = _resolve_hub_url(args)
+    domain = _resolve_domain(args, Path.cwd())
+    key = args.key.strip()
+    value = args.value
+    if value is None:
+        if not sys.stdin.isatty():
+            value = sys.stdin.read().rstrip("\r\n")
+        else:
+            value = getpass.getpass(f"Enter value for {key}: ")
+    if not value:
+        raise SystemExit("Secret value cannot be empty.")
+
+    res = _http_json(
+        "POST",
+        f"{hub_url}/api/secrets/{urllib.parse.quote(domain, safe='')}",
+        {"key": key, "value": value},
+    )
+    print(f"Stored secret '{key}' for {domain} (node-local only). Active keys: {', '.join(res.get('keys', []))}")
+    return 0
+
+
+def cmd_secret_list(args: argparse.Namespace) -> int:
+    hub_url = _resolve_hub_url(args)
+    domain = _resolve_domain(args, Path.cwd())
+    res = _http_json("GET", f"{hub_url}/api/secrets/{urllib.parse.quote(domain, safe='')}")
+    keys = res.get("keys") or []
+    if not keys:
+        print(f"No secrets configured for {domain}.")
+        return 0
+    print(f"Secrets for {domain}:")
+    for k in keys:
+        print(f"  - {k}")
+    return 0
+
+
+def cmd_secret_delete(args: argparse.Namespace) -> int:
+    hub_url = _resolve_hub_url(args)
+    domain = _resolve_domain(args, Path.cwd())
+    key = args.key.strip()
+    res = _http_json(
+        "POST",
+        f"{hub_url}/api/secrets/{urllib.parse.quote(domain, safe='')}",
+        {"key": key, "delete": True},
+    )
+    print(f"Deleted secret '{key}' for {domain}. Remaining keys: {', '.join(res.get('keys', [])) or '(none)'}")
+    return 0
+
+
+def _collect_static_files(root: Path) -> tuple[dict[str, str], str]:
+    files: dict[str, str] = {}
+    html = ""
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel_parts = path.relative_to(root).parts
+        if any(part in IGNORED_DIRS or part.startswith(".") for part in rel_parts):
+            continue
+        rel = path.relative_to(root).as_posix()
+        if rel in {"backend.py", "xanadu.json"}:
+            continue
+        raw = path.read_bytes()
+        if len(raw) > MAX_TEXT_FILE_BYTES:
+            raise SystemExit(f"File too large (>2MB) for capsule bundle: {rel}")
+        mime, _ = mimetypes.guess_type(path.name)
+        is_text = (mime and (mime.startswith("text/") or mime in {"application/javascript", "application/json", "image/svg+xml"})) or path.suffix.lower() in {
+            ".html", ".htm", ".css", ".js", ".mjs", ".json", ".svg", ".txt", ".md", ".xml"
+        }
+        if is_text:
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                content = f"data:{mime or 'application/octet-stream'};base64,{base64.b64encode(raw).decode('ascii')}"
+        else:
+            content = f"data:{mime or 'application/octet-stream'};base64,{base64.b64encode(raw).decode('ascii')}"
+        files[rel] = content
+        if rel == "index.html":
+            html = content
+    return files, html
+
+
+def cmd_deploy(args: argparse.Namespace) -> int:
+    project_dir = Path(args.dir).resolve()
+    if not project_dir.is_dir():
+        raise SystemExit(f"Deploy directory does not exist: {project_dir}")
+
+    cfg = _load_cli_config()
+    manifest = _load_project_manifest(project_dir)
+    hub_url = _resolve_hub_url(args)
+    domain = _resolve_domain(args, project_dir)
+
+    dist_sub = args.dist or manifest.get("dist")
+    static_root = (project_dir / dist_sub).resolve() if dist_sub else project_dir
+    if not static_root.is_dir():
+        for candidate in ("dist", "build", "out", "public"):
+            if (project_dir / candidate).is_dir() and (project_dir / candidate / "index.html").exists():
+                static_root = (project_dir / candidate).resolve()
+                break
+
+    files, html = _collect_static_files(static_root)
+    if not files and not html:
+        raise SystemExit(f"No files found to deploy in {static_root}")
+
+    backend_path = project_dir / str(manifest.get("backend", "backend.py"))
+    backend_py = backend_path.read_text(encoding="utf-8") if backend_path.is_file() else ""
+
+    connect_origins = manifest.get("connect_origins") or []
+    if args.connect_origin:
+        connect_origins = list(dict.fromkeys([*connect_origins, *args.connect_origin]))
+
+    payload = {
+        "domain": domain,
+        "title": args.title or manifest.get("title") or domain,
+        "html": html,
+        "files": files,
+        "backend_py": backend_py,
+        "connect_origins": connect_origins,
+    }
+    privkey = args.privkey or cfg.get("privkey_hex")
+    claim_token = args.claim_token or cfg.get("claim_token")
+    if privkey:
+        payload["privkey_hex"] = privkey
+    if claim_token:
+        payload["claim_token"] = claim_token
+
+    res = _http_json("POST", f"{hub_url}/api/publish_capsule", payload)
+    print(f"Deployed {res.get('domain', domain)} (v{res.get('version', '?')}, sha256={str(res.get('sha256', ''))[:12]}...)")
+    if connect_origins:
+        print(f"  connect_origins: {', '.join(connect_origins)}")
+    if backend_py:
+        print("  backend.py: included (reads node-local secrets via `secrets.get(...)`)")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="xnd", description="Xanadu CLI for capsule deployment and node-local secrets")
+    parser.add_argument("--hub", help=f"Hub base URL (default: $XND_HUB_URL or {DEFAULT_HUB_URL})")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_login = sub.add_parser("login", help="Configure hub URL, default domain, and signing key in ~/.xanadu/cli.json")
+    p_login.add_argument("--hub", help=f"Hub base URL (default: {DEFAULT_HUB_URL})")
+    p_login.add_argument("--domain", help="Default capsule domain (e.g. app.xanadu)")
+    p_login.add_argument("--privkey", help="Ed25519 private key hex")
+    p_login.add_argument("--prompt-privkey", action="store_true", help="Prompt interactively for private key hex")
+    p_login.add_argument("--claim-token", help="Domain claim token")
+    p_login.add_argument("--no-verify", action="store_true", help="Skip /api/health verification")
+    p_login.set_defaults(func=cmd_login)
+
+    p_secret = sub.add_parser("secret", help="Manage node-local capsule secrets (never synced or bundled)")
+    secret_sub = p_secret.add_subparsers(dest="secret_cmd", required=True)
+
+    p_put = secret_sub.add_parser("put", help="Store or update a node-local secret for a capsule")
+    p_put.add_argument("key", help="Secret environment key name (e.g. SUPABASE_SERVICE_ROLE_KEY)")
+    p_put.add_argument("--domain", help="Capsule domain (defaults to xanadu.json or login config)")
+    p_put.add_argument("--value", help="Secret value (if omitted, prompts securely)")
+    p_put.set_defaults(func=cmd_secret_put)
+
+    p_list = secret_sub.add_parser("list", help="List configured secret key names for a capsule")
+    p_list.add_argument("--domain", help="Capsule domain")
+    p_list.set_defaults(func=cmd_secret_list)
+
+    p_del = secret_sub.add_parser("delete", help="Delete a node-local secret for a capsule")
+    p_del.add_argument("key", help="Secret key name to delete")
+    p_del.add_argument("--domain", help="Capsule domain")
+    p_del.set_defaults(func=cmd_secret_delete)
+
+    p_deploy = sub.add_parser("deploy", help="Bundle and publish a capsule (static files, backend.py, xanadu.json)")
+    p_deploy.add_argument("dir", nargs="?", default=".", help="Project directory (default: .)")
+    p_deploy.add_argument("--domain", help="Capsule domain")
+    p_deploy.add_argument("--title", help="Capsule title")
+    p_deploy.add_argument("--dist", help="Subdirectory containing static build output")
+    p_deploy.add_argument("--connect-origin", action="append", help="Extra allowed connect_origins URL")
+    p_deploy.add_argument("--privkey", help="Signing private key hex override")
+    p_deploy.add_argument("--claim-token", help="Domain claim token override")
+    p_deploy.set_defaults(func=cmd_deploy)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

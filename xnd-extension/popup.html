@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { width: 300px; margin: 0; padding: 14px; font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; }
+    h1 { margin: 0 0 6px; font-size: 15px; }
+    p { margin: 0 0 10px; font-size: 12px; color: #94a3b8; }
+    form { display: flex; gap: 6px; }
+    input { flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid #334155; background: #020617; color: #f8fafc; font-size: 13px; }
+    button { padding: 8px 12px; border-radius: 8px; border: none; background: #2563eb; color: #fff; font-weight: 600; cursor: pointer; }
+    .links { margin-top: 12px; padding-top: 10px; border-top: 1px solid #1e293b; display: flex; justify-content: space-between; font-size: 12px; }
+    a { color: #60a5fa; text-decoration: none; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Xanadu (.xnd)</h1>
+  <p>Tip: type <code>xnd mysite.xnd</code> in the address bar.</p>
+  <form id="open-form">
+    <input id="dom-input" placeholder="manifesto.xnd" required />
+    <button type="submit">Go</button>
+  </form>
+  <div class="links">
+    <a id="local-node-link" href="#">Local Node</a>
+    <a href="https://github.com/xanadu-net/xanadu/releases" target="_blank" rel="noopener">Install Node App</a>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

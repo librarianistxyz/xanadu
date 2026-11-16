@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Xanadu Browser</title>
+  <link rel="icon" type="image/png" href="/static/logo.png" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand" id="btn-home" title="Go to home.xnd">
+      <img src="/static/logo.png" alt="Xanadu" style="width:30px;height:30px;border-radius:7px;display:block;" />
+      <span>XANADU</span>
+      <span class="tld-badge">.xnd</span>
+    </div>
+
+    <div class="nav-controls">
+      <button id="btn-nav-back" class="btn-tool nav-btn" title="Back" disabled>←</button>
+      <button id="btn-nav-fwd" class="btn-tool nav-btn" title="Forward" disabled>→</button>
+      <button id="btn-nav-refresh" class="btn-tool nav-btn" title="Refresh">↻</button>
+    </div>
+
+    <form id="omnibox-form" class="omnibox">
+      <div class="omnibox-input-wrap">
+        <input
+          id="omnibox-input"
+          type="text"
+          placeholder="Enter any domain (heart.xnd, x.com, wikipedia.org) or ask anything (what is x)..."
+          autocomplete="off"
+        />
+        <button type="button" id="btn-omnibox-clear" class="omnibox-clear hidden" title="Clear search" aria-label="Clear search">×</button>
+      </div>
+      <button type="submit">Go / Search</button>
+    </form>
+
+    <button type="button" id="btn-mobile-menu" class="btn-tool mobile-menu-btn" title="Menu" aria-label="Open menu">☰</button>
+
+    <div class="top-actions">
+      <button id="btn-bookmark" class="btn-tool" title="Bookmark current page">★</button>
+      <button id="btn-registry" class="btn-tool">Registry</button>
+      <button id="btn-library" class="btn-tool">Library</button>
+      <button id="btn-graph-view" class="btn-tool">Graph</button>
+      <button id="btn-archive-modal" class="btn-tool">Archive</button>
+      <button id="btn-keys-modal" class="btn-tool">Keys</button>
+      <button id="btn-sync-modal" class="btn-tool">Sync</button>
+      <button id="btn-publish-modal" class="btn-accent">+ Register Domain</button>
+    </div>
+  </header>
+
+  <div id="mobile-drawer-backdrop" class="mobile-drawer-backdrop hidden"></div>
+  <aside id="mobile-drawer" class="mobile-drawer hidden" aria-label="Xanadu Navigation Menu">
+    <div class="mobile-drawer-head">
+      <span style="font-weight:700;font-size:15px;">XANADU <span class="tld-badge">.xnd</span></span>
+      <button type="button" id="btn-mobile-drawer-close" class="btn-ghost" style="padding:6px 10px;">✕</button>
+    </div>
+    <div class="mobile-drawer-list">
+      <button type="button" class="btn-accent" data-proxy-btn="btn-publish-modal">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        <span>Register Domain</span>
+      </button>
+      <button type="button" class="btn-tool" data-proxy-btn="btn-home">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 9.5V20h14V9.5"/></svg>
+        <span>Home (home.xnd)</span>
+      </button>
+      <button type="button" class="btn-tool" data-proxy-btn="btn-bookmark">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        <span>Bookmark Page</span>
+      </button>
+      <button type="button" class="btn-tool" data-proxy-btn="btn-registry">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <span>Registry</span>
+      </button>
+      <button type="button" class="btn-tool" data-proxy-btn="btn-library">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <span>Library</span>
+      </button>
+      <button type="button" class="btn-tool" data-proxy-btn="btn-graph-view">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><line x1="8.5" y1="7.5" x2="15.5" y2="7.5"/><line x1="7.5" y1="8.5" x2="10.8" y2="15.3"/><line x1="16.5" y1="8.5" x2="13.2" y2="15.3"/></svg>
+        <span>Constellation Graph</span>
+      </button>
+      <button type="button" class="btn-tool" data-proxy-btn="btn-archive-modal">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+        <span>Archive Web Page</span>
+      </button>
+      <button type="button" class="btn-tool" data-proxy-btn="btn-keys-modal">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="M21 2l-9.6 9.6"/><path d="M15.5 7.5l3 3L22 7l-3-3"/></svg>
+        <span>Keys</span>
+      </button>
+      <button type="button" class="btn-tool" data-proxy-btn="btn-sync-modal">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        <span>P2P Sync</span>
+      </button>
+    </div>
+  </aside>
+
+  <div id="tab-strip" class="tab-strip"></div>
+
+  <main class="workspace" id="workspace">
+    <svg id="bridge-svg" class="bridge-svg"></svg>
+
+    <section class="pane" id="primary-pane">
+      <div id="ptr-indicator" class="ptr-indicator" aria-hidden="true"></div>
+    </section>
+
+    <section class="pane pane-right hidden" id="secondary-pane">
+      <div class="split-header">
+        <span id="secondary-label">Origin Span</span>
+        <button id="btn-close-split" class="btn-ghost">✕ Close Split</button>
+      </div>
+      <div id="secondary-content" class="pane-scroll"></div>
+    </section>
+  </main>
+
+  <div id="quote-bar" class="quote-bar hidden">
+    <span id="quote-preview"></span>
+    <button id="btn-quote-into" class="btn-accent">Transclude into .xnd</button>
+  </div>
+
+  <!-- Register Domain / Deploy Site Modal -->
+  <div id="publish-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Domain Registry — Register or Deploy .xnd</h2>
+        <button id="btn-close-modal" class="btn-ghost">✕</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:14px;">
+        <button type="button" id="tab-doc" class="ver-btn active">Document (Text)</button>
+        <button type="button" id="tab-cap" class="ver-btn">Site / App Bundle (Multi-file + Backend)</button>
+      </div>
+      <form id="publish-form">
+        <label>
+          Domain Name (5+ characters)
+          <input id="pub-domain" type="text" placeholder="e.g. cybernotes.xnd" required />
+        </label>
+        <label>
+          Page Title
+          <input id="pub-title" type="text" placeholder="My Sovereign Node" required />
+        </label>
+        <div id="doc-fields">
+          <label>
+            Content (supports <code>{{xnd://domain@v1:start-end}}</code>)
+            <textarea id="pub-content" rows="7" placeholder="Write text or paste a transclusion pointer..."></textarea>
+          </label>
+          <div style="margin-top:8px;padding:10px;border:1px dashed var(--line);border-radius:8px;">
+            <label style="display:flex;align-items:center;gap:8px;margin:0;cursor:pointer;font-size:13px;">
+              <input id="pub-e2ee-toggle" type="checkbox" style="width:auto;" />
+              <span>🔒 Private / Invite-Only E2EE Space (encrypts before Nostr &amp; P2P sync)</span>
+            </label>
+            <textarea id="pub-e2ee-keys" rows="2" class="hidden" style="margin-top:8px;font-family:var(--font-mono);font-size:11px;" placeholder="Invited peer Ed25519 pubkey_hex (64-char hex, comma/newline separated). Your own key is always included."></textarea>
+          </div>
+        </div>
+        <div id="cap-fields" class="hidden">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px;padding:10px;border:1px dashed var(--line);border-radius:8px;">
+            <label style="margin:0;font-size:12px;">
+              Push Website Folder:
+              <input id="site-folder-input" type="file" webkitdirectory multiple style="font-size:11px;padding:4px;" />
+            </label>
+            <label style="margin:0;font-size:12px;">
+              Or Select Multiple Files:
+              <input id="site-files-input" type="file" multiple style="font-size:11px;padding:4px;" />
+            </label>
+            <button type="button" id="btn-clear-site-files" class="btn-ghost" style="font-size:11px;">Clear Files</button>
+          </div>
+          <div id="site-files-summary" style="font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-bottom:10px;"></div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+            <input id="asset-file" type="file" style="font-size:11px;padding:4px;" />
+            <button type="button" id="btn-upload-asset" class="btn-ghost" style="white-space:nowrap;">Upload Media Asset</button>
+          </div>
+          <label>
+            Frontend Entry (<code>index.html</code> — optional if included in uploaded folder)
+            <textarea id="pub-html" rows="6" placeholder="<!DOCTYPE html>..."></textarea>
+          </label>
+          <label>
+            Sandboxed Backend Python (<code>def handle(action, payload, state):</code>)
+            <textarea id="pub-backend" rows="4" placeholder="def handle(action, payload, state): ..."></textarea>
+          </label>
+        </div>
+        <label>
+          Domain Private Key (required to edit an existing domain; leave blank for new domain)
+          <input id="pub-key" type="text" placeholder="Leave blank for new domain, or paste 64-char Ed25519 private key to edit" />
+        </label>
+        <div class="modal-actions">
+          <button type="submit" class="btn-accent">Sign (Ed25519) &amp; Deploy</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Web-to-.xnd Archive Modal -->
+  <div id="archive-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Web-to-.xnd Snapshot Archiver</h2>
+        <button id="btn-close-archive" class="btn-ghost">✕</button>
+      </div>
+      <form id="archive-form">
+        <label>
+          Public Web URL (e.g. <code>example.com</code> or <code>https://...</code>)
+          <input id="arch-url" type="text" placeholder="example.com or https://example.com" required />
+        </label>
+        <label>
+          Target .xnd Domain (optional — auto-generates <code>web-xxxxxxxx.xnd</code> if blank)
+          <input id="arch-domain" type="text" placeholder="e.g. saved-article.xnd" />
+        </label>
+        <div class="modal-actions">
+          <button type="submit" class="btn-accent">Archive Snapshot to .xnd</button>
+        </div>
+      </form>
+      <div id="archive-status" style="margin-top:10px;font-family:var(--font-mono);font-size:12px;"></div>
+    </div>
+  </div>
+
+  <!-- Ed25519 Key Backup / Import Modal -->
+  <div id="keys-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Ed25519 Domain Key Ownership</h2>
+        <button id="btn-close-keys" class="btn-ghost">✕</button>
+      </div>
+      <div style="margin-bottom:14px;">
+        <button type="button" id="btn-export-current-key" class="btn-ghost">Export Key for Current .xnd</button>
+        <pre id="key-export-out" style="background:#fff;border:1px solid var(--hairline-dark);padding:8px;font-size:11px;overflow:auto;max-height:90px;margin-top:8px;">Select a local .xnd domain and click Export.</pre>
+      </div>
+      <form id="key-import-form">
+        <label>
+          Import Domain Name (<code>.xnd</code>)
+          <input id="imp-domain" type="text" placeholder="myname.xnd" required />
+        </label>
+        <label>
+          Ed25519 Private Key Hex
+          <input id="imp-privkey" type="text" placeholder="64-char hex private key" required />
+        </label>
+        <div class="modal-actions">
+          <button type="submit" class="btn-accent">Import Key Ownership</button>
+        </div>
+      </form>
+      <div id="key-status" style="margin-top:10px;font-family:var(--font-mono);font-size:12px;"></div>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--hairline-dark);">
+        <h3 style="margin:0 0 8px;font-size:14px;">Multi-Device Encrypted Key Sync (Laptop &harr; Phone)</h3>
+        <label style="display:block;font-size:12px;margin-bottom:8px;">
+          Sync Passphrase (min 4 chars)
+          <input id="sync-key-pass" type="password" placeholder="Enter shared passphrase" />
+        </label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+          <button type="button" id="btn-sync-key-export" class="btn-ghost">Export Encrypted Token</button>
+          <button type="button" id="btn-sync-key-copy" class="btn-ghost" style="display:none;">Copy Token</button>
+        </div>
+        <textarea id="sync-key-token" rows="3" placeholder="XNDKEY1:... encrypted token appears here (or paste one from another device to import)" style="width:100%;font-family:var(--font-mono);font-size:11px;padding:6px;border:1px solid var(--hairline-dark);box-sizing:border-box;"></textarea>
+        <div style="margin-top:8px;">
+          <button type="button" id="btn-sync-key-import" class="btn-accent">Import Encrypted Token</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Newly Created Domain Recovery Key Modal -->
+  <div id="created-key-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Save Your Domain Private Key</h2>
+        <button id="btn-close-created-key" class="btn-ghost">✕</button>
+      </div>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:10px;">
+        You just claimed <strong id="created-key-domain"></strong>. Save this Ed25519 private key so you can edit or recover this domain from any device (Desktop or Mobile).
+      </p>
+      <pre id="created-key-hex" style="background:var(--bg);border:1px solid var(--hairline-dark);padding:10px;border-radius:8px;font-size:12px;word-break:break-all;white-space:pre-wrap;user-select:all;"></pre>
+      <div class="modal-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+        <button type="button" id="btn-copy-created-key" class="btn-ghost">Copy Private Key</button>
+        <button type="button" id="btn-download-created-key" class="btn-ghost">Download Key JSON</button>
+        <button type="button" id="btn-done-created-key" class="btn-accent">Done — Open Domain</button>
+      </div>
+      <div id="created-key-status" style="margin-top:8px;font-family:var(--font-mono);font-size:12px;color:var(--muted);"></div>
+    </div>
+  </div>
+
+  <!-- P2P Sync & Auto-Gossip Modal -->
+  <div id="sync-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>P2P Node Sync &amp; Auto-Gossip</h2>
+        <button id="btn-close-sync" class="btn-ghost">✕</button>
+      </div>
+      <form id="sync-form">
+        <label>
+          Peer Node URL / IP (no .com domain needed)
+          <input id="sync-peer-url" type="text" placeholder="http://192.168.1.50:8765" required />
+        </label>
+        <div class="modal-actions">
+          <button type="submit" class="btn-accent">Pull &amp; Add to Auto-Gossip</button>
+        </div>
+      </form>
+      <hr style="border:none;border-top:1px solid rgba(128,128,128,0.2);margin:14px 0;" />
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+          <span style="font-family:var(--font-mono);font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;">Offline LAN / Wi-Fi Mesh</span>
+          <button type="button" id="btn-lan-sync" class="btn-accent" style="padding:5px 12px;font-size:12px;" onclick="syncLanMeshNow()">⚡ Sync LAN Mesh Now</button>
+        </div>
+        <div id="sync-lan-list" style="font-size:12px;color:var(--muted);">Scanning local Wi-Fi (UDP 8766)...</div>
+      </div>
+      <div style="margin-top:10px;padding:10px 12px;border:1px solid rgba(128,128,128,0.22);border-radius:8px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="min-width:0;">
+          <div style="font-family:var(--font-mono);font-size:11px;font-weight:700;text-transform:uppercase;display:flex;align-items:center;gap:6px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+            Internet Sharing (Mesh Gateway)
+          </div>
+          <div id="sync-gateway-status" style="font-size:12px;color:var(--muted);margin-top:2px;">Checking connectivity...</div>
+        </div>
+        <button type="button" id="btn-toggle-gateway" class="btn-tool" style="padding:5px 12px;font-size:12px;">Share Internet: ...</button>
+      </div>
+      <hr style="border:none;border-top:1px solid rgba(128,128,128,0.2);margin:14px 0;" />
+      <div>
+        <label>
+          Optional Public / Tunnel URL (to share your node globally)
+          <input id="p2p-public-url" type="text" placeholder="https://xxxx.trycloudflare.com (optional)" />
+        </label>
+        <div class="modal-actions" style="margin-top:8px;">
+          <button type="button" id="btn-join-global-p2p" class="btn-accent" onclick="joinGlobalP2P()">🌐 Join Global P2P (Nostr + PEX)</button>
+        </div>
+      </div>
+      <div id="sync-status" style="margin-top:12px;font-family:var(--font-mono);font-size:12px;color:var(--faded-ink);"></div>
+      <div id="sync-peers-list" style="margin-top:10px;max-height:170px;overflow:auto;font-size:12px;"></div>
+      <div id="sync-moderation-list" style="margin-top:10px;max-height:130px;overflow:auto;font-size:12px;"></div>
+    </div>
+  </div>
+
+  <span id="dl-status" class="status-pill hidden" style="position:fixed;bottom:12px;right:16px;z-index:50;"></span>
+
+  <script src="/static/transclusion.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

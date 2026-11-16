@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xanadu.local/schemas/xnd-e2ee-envelope.schema.json",
+  "title": "Xanadu E2EE Envelope (XND-E2EE-v1)",
+  "type": "object",
+  "required": ["v", "nonce", "ct", "recipients"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "nonce": { "type": "string", "minLength": 16 },
+    "ct": { "type": "string", "minLength": 22 },
+    "recipients": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["eph", "nonce", "wk"],
+        "properties": {
+          "eph": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "nonce": { "type": "string", "minLength": 16 },
+          "wk": { "type": "string", "minLength": 64 }
+        }
+      }
+    }
+  }
+}

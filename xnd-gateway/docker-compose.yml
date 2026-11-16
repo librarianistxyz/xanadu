@@ -1,0 +1,13 @@
+services:
+  xnd-gateway:
+    build:
+      context: ..
+      dockerfile: xnd-gateway/Dockerfile
+    ports:
+      - "8780:8780"
+    environment:
+      - XND_GATEWAY_PORT=8780
+      - XND_GATEWAY_RATE_PER_MIN=60
+      - XND_GATEWAY_CACHE_TTL=60
+      - XND_NODE_DOWNLOAD_URL=${XND_NODE_DOWNLOAD_URL:-https://github.com/xanadu-net/xanadu/releases}
+    restart: unless-stopped

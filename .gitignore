@@ -1,0 +1,45 @@
+# Node data, private keys, vaults, and secrets (NEVER commit)
+**/node_data/
+node_data/
+**/.xanadu/
+*.key.json
+*.xnd-account.json
+capsule_secrets/
+account_vault.json
+.env
+.env.*
+
+# Python build/cache
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+xnd-hub/build/
+xnd-hub/dist/
+
+# Desktop Electron build artifacts & bundled binaries
+xnd-desktop/node_modules/
+xnd-desktop/dist/
+xnd-desktop/resources/
+xnd-desktop/build/xnd-hub-bin/
+xnd-desktop/bin/xnd-hub-bin
+xnd-desktop/bin/xnd-crawler-bin
+
+# Android build artifacts & keystores
+xnd-android/build/
+xnd-android/assets/
+*.apk
+*.aab
+*.idsig
+*.keystore
+*.jks
+
+# Rust / native build artifacts
+**/target/
+
+# OS & editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*~

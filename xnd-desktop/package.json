@@ -1,0 +1,51 @@
+{
+  "name": "xanadu-desktop",
+  "version": "0.1.0",
+  "author": "Xanadu <dev@xanadu.local>",
+  "homepage": "https://xanadu.local",
+  "description": "Native Electron Chromium shell for Xanadu Browser (.xnd + full live WWW)",
+  "main": "main.js",
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "dist": "electron-builder --linux AppImage deb"
+  },
+  "build": {
+    "appId": "com.xanadu.browser",
+    "productName": "Xanadu Browser",
+    "directories": {
+      "output": "dist"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network;WebBrowser;"
+    },
+    "extraResources": [
+      {
+        "from": "../xnd-hub",
+        "to": "xnd-hub",
+        "filter": [
+          "**/*",
+          "!node_data/**",
+          "!__pycache__/**",
+          "!*.pyc"
+        ]
+      },
+      {
+        "from": "../xnd-ui",
+        "to": "xnd-ui"
+      },
+      {
+        "from": "bin",
+        "to": "bin"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
+  }
+}

@@ -1,0 +1,5 @@
+[package]
+name = "xnd-core"
+version = "0.1.0"
+edition = "2021"
+description = "Fast, zero-dependency Rust cryptographic & span-addressing core for Xanadu (.xnd)"
