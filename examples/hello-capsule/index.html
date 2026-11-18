@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Hello Capsule (.xnd)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; background: #0f172a; color: #e2e8f0; }
+    button { padding: 8px 14px; border-radius: 6px; border: 0; background: #38bdf8; color: #0f172a; font-weight: 600; cursor: pointer; }
+    pre { background: #1e293b; padding: 12px; border-radius: 8px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Hello from a Sovereign <code>.xnd</code> Capsule</h1>
+  <p>Backed by per-capsule SQLite inside <code>xnd-hub</code> — zero cloud servers.</p>
+  <button id="ping">Record Visit</button>
+  <pre id="out">Loading...</pre>
+  <script>
+    async function refresh(method = "GET") {
+      const res = await fetch("./api/visits", {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: method === "POST" ? JSON.stringify({ note: new Date().toISOString() }) : undefined
+      });
+      document.getElementById("out").textContent = JSON.stringify(await res.json(), null, 2);
+    }
+    document.getElementById("ping").onclick = () => refresh("POST");
+    refresh();
+  </script>
+</body>
+</html>

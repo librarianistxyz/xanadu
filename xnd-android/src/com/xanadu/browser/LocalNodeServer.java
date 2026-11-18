@@ -97,6 +97,8 @@ public class LocalNodeServer {
     private final Map<String, String> trustPetnames = Collections.synchronizedMap(new HashMap<>());
     private final Map<String, Map<String, String>> trustConflicts = Collections.synchronizedMap(new HashMap<>());
     private final byte[] capTokenSecret = new byte[32];
+    private static final int MAX_CACHED_DOMAINS = 5000;
+    private final Map<String, Long> domainLastAccess = new java.util.concurrent.ConcurrentHashMap<>();
     private static final Pattern CANONICAL_DOMAIN_RE = Pattern.compile("^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\\.([0-9a-f]{8,16})\\.xnd$");
 
     public LocalNodeServer(Context ctx, int port) {
@@ -627,7 +629,10 @@ public class LocalNodeServer {
                     }
                 }
                 if (d == null && dom.endsWith(".xnd") && !blockedDomains.contains(dom)) {
-                    lookupDocNostr(parsedCanon != null ? parsedCanon[0] : dom);
+                    String lookupTarget = parsedCanon != null ? parsedCanon[0] : dom;
+                    if (!tryResolveFromPeers(lookupTarget)) {
+                        lookupDocNostr(lookupTarget);
+                    }
                     d = docs.get(dom);
                     if (d == null && parsedCanon != null) {
                         JSONObject bd = docs.get(parsedCanon[0]);
@@ -640,6 +645,7 @@ public class LocalNodeServer {
                 if (d == null) {
                     sendJson(out, 404, "{\"detail\":\"Domain not found locally\"}");
                 } else {
+                    domainLastAccess.put(storageDom, System.currentTimeMillis());
                     JSONObject outDoc = new JSONObject(d.toString());
                     outDoc.put("domain", dom);
                     int vNum = outDoc.optInt("version", outDoc.optInt("version_num", 1));
@@ -1614,7 +1620,17 @@ public class LocalNodeServer {
             } else if (path.equals("/api/nat/status")) {
                 sendJson(out, 200, (natTunnel != null ? natTunnel.status() : new JSONObject().put("ok", false).put("stun_ok", false)).toString());
             } else if (path.equals("/api/sync/manifest")) {
-                sendJson(out, 200, exportManifest().toString());
+                Map<String, String> qm = parseQuery(query);
+                double sinceVal = 0.0;
+                int limitVal = 500;
+                boolean hasSince = qm.containsKey("since");
+                if (hasSince) {
+                    try { sinceVal = Double.parseDouble(qm.get("since")); } catch (Exception ignored) {}
+                }
+                if (qm.containsKey("limit")) {
+                    try { limitVal = Math.max(1, Math.min(2000, Integer.parseInt(qm.get("limit")))); } catch (Exception ignored) {}
+                }
+                sendJson(out, 200, (hasSince ? exportManifest(sinceVal, limitVal) : exportManifest()).toString());
             } else if (path.equals("/api/config/public-gateway") && method.equals("GET")) {
                 String gwUrl = "http://127.0.0.1:" + port;
                 try {
@@ -2440,12 +2456,14 @@ public class LocalNodeServer {
                     d.put("backlinks", new JSONArray());
                     d.put("rust_core_active", false);
                     docs.put(targetDom, d);
+                    domainLastAccess.put(targetDom, System.currentTimeMillis());
                     imported++;
                 } catch (Exception ignored) {
                 }
             }
         }
         if (imported > 0) {
+            pruneUnpinnedDomainsIfNeeded();
             gossipImported += imported;
             saveDocs();
         }
@@ -2842,6 +2860,66 @@ public class LocalNodeServer {
     }
 
     private final Map<String, Long> negLookupCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private void pruneUnpinnedDomainsIfNeeded() {
+        List<Map.Entry<String, Long>> evictable = new ArrayList<>();
+        synchronized (docs) {
+            for (Map.Entry<String, JSONObject> e : docs.entrySet()) {
+                String dom = e.getKey();
+                JSONObject d = e.getValue();
+                if (d.optBoolean("owned_locally", false) || !d.optString("privkey_hex", "").isEmpty() || domainKeys.containsKey(dom)) {
+                    continue;
+                }
+                String pub = d.optString("pubkey_hex", d.optString("pubkey", "")).toLowerCase(Locale.US);
+                if (!pub.isEmpty() && followedPubkeys.contains(pub)) {
+                    continue;
+                }
+                long ts = domainLastAccess.getOrDefault(dom, (long) (d.optDouble("created_at", 0.0) * 1000.0));
+                evictable.add(new java.util.AbstractMap.SimpleEntry<>(dom, ts));
+            }
+            if (evictable.size() <= MAX_CACHED_DOMAINS) return;
+            evictable.sort((a, b) -> Long.compare(a.getValue(), b.getValue()));
+            int toRemove = evictable.size() - (int) (MAX_CACHED_DOMAINS * 0.9);
+            for (int i = 0; i < toRemove && i < evictable.size(); i++) {
+                String victim = evictable.get(i).getKey();
+                docs.remove(victim);
+                domainLastAccess.remove(victim);
+            }
+        }
+    }
+
+    private boolean tryResolveFromPeers(String targetDomain) {
+        String clean = targetDomain == null ? "" : targetDomain.trim().toLowerCase(Locale.US);
+        if (clean.isEmpty() || blockedDomains.contains(clean)) return false;
+        try {
+            String qDom = URLEncoder.encode(clean, "UTF-8");
+            List<String> candidates = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            for (String u : lanPeers.keySet()) {
+                String bu = u.replaceAll("/+$", "");
+                if (!bu.isEmpty() && seen.add(bu)) candidates.add(bu);
+            }
+            synchronized (peers) {
+                for (JSONObject p : peers) {
+                    String bu = p.optString("url", "").replaceAll("/+$", "");
+                    if (!bu.isEmpty() && seen.add(bu)) candidates.add(bu);
+                }
+            }
+            int tried = 0;
+            for (String peerUrl : candidates) {
+                if (tried++ >= 6) break;
+                try {
+                    String raw = peerGet(peerUrl, "/api/sync/export?domain=" + qDom, 2500);
+                    JSONObject bundle = new JSONObject(raw);
+                    if (bundle.has("versions") && bundle.getJSONArray("versions").length() > 0) {
+                        int[] st = importBundle(bundle);
+                        if (st[0] > 0 || docs.containsKey(clean)) return true;
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
 
     private boolean lookupDocNostr(String targetDomain) {
         String clean = targetDomain == null ? "" : targetDomain.trim().toLowerCase(Locale.US);
@@ -3261,16 +3339,38 @@ public class LocalNodeServer {
     }
 
     private JSONObject exportManifest() {
+        return exportManifest(0.0, 500);
+    }
+
+    private JSONObject exportManifest(double since, int limit) {
+        int cap = Math.max(1, Math.min(2000, limit));
         JSONObject domMap = new JSONObject();
+        double nextCursor = since;
+        boolean hasMore = false;
         try {
+            List<Map.Entry<String, JSONObject>> entries = new ArrayList<>();
             synchronized (docs) {
                 for (Map.Entry<String, JSONObject> e : docs.entrySet()) {
-                    JSONObject d = e.getValue();
-                    domMap.put(e.getKey(), new JSONObject()
-                            .put("latest_version", d.optInt("version_num", d.optInt("version", 1)))
-                            .put("sha256", d.optString("sha256", ""))
-                            .put("pubkey_hex", d.optString("pubkey_hex", d.optString("pubkey", ""))));
+                    double upd = e.getValue().optDouble("created_at", 0.0);
+                    if (since <= 0.0 || upd > since) {
+                        entries.add(e);
+                    }
                 }
+            }
+            entries.sort((a, b) -> Double.compare(a.getValue().optDouble("created_at", 0.0), b.getValue().optDouble("created_at", 0.0)));
+            if (entries.size() > cap) {
+                hasMore = true;
+                entries = entries.subList(0, cap);
+            }
+            for (Map.Entry<String, JSONObject> e : entries) {
+                JSONObject d = e.getValue();
+                double upd = d.optDouble("created_at", 0.0);
+                if (upd > nextCursor) nextCursor = upd;
+                domMap.put(e.getKey(), new JSONObject()
+                        .put("latest_version", d.optInt("version_num", d.optInt("version", 1)))
+                        .put("sha256", d.optString("sha256", ""))
+                        .put("pubkey_hex", d.optString("pubkey_hex", d.optString("pubkey", "")))
+                        .put("updated_at", upd));
             }
             return new JSONObject()
                     .put("ok", true)
@@ -3281,6 +3381,8 @@ public class LocalNodeServer {
                     .put("seed_node", shareGateway && checkHasWan())
                     .put("dht_k", 3)
                     .put("domains", domMap)
+                    .put("next_cursor", nextCursor)
+                    .put("has_more", hasMore)
                     .put("mesh_bytes", computeMeshBytes())
                     .put("mesh_quota_bytes", MAX_MESH_QUOTA_BYTES);
         } catch (Exception e) {

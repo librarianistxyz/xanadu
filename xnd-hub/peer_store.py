@@ -18,8 +18,11 @@ import zlib
 from pathlib import Path
 from typing import Any
 
+from services.index_db import IndexDB
+
 MAX_CACHE_MB = float(os.environ.get("XND_MAX_CACHE_MB", "512"))
 MAX_CACHE_BYTES = int(MAX_CACHE_MB * 1024 * 1024)
+MAX_CACHED_DOMAINS = max(10, int(os.environ.get("XND_MAX_CACHED_DOMAINS", "5000")))
 TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
 
 _SYNONYM_GROUPS = [
@@ -88,6 +91,7 @@ class PeerStore:
         self.followed_pubkeys: set[str] = set()
         self.bookmarks: list[dict[str, Any]] = []
         self.history: list[dict[str, Any]] = []
+        self.index_db = IndexDB(data_dir / "index.sqlite3")
 
         self._load_from_disk()
 
@@ -134,6 +138,22 @@ class PeerStore:
                     self.followed_pubkeys = set(mod.get("followed_pubkeys", []))
                 except Exception:
                     pass
+
+            # One-time backfill into SQLite + FTS5 index if empty
+            if self.domains and self.index_db.count_unpinned_domains() == 0:
+                for dom_name, dom_obj in list(self.domains.items()):
+                    vers = self.versions.get(dom_name, [])
+                    is_pinned = bool(dom_obj.get("privkey_hex")) or any(v.get("pinned", True) for v in vers)
+                    self.index_db.upsert_domain(
+                        dom_name,
+                        pubkey_hex=str(dom_obj.get("pubkey_hex") or ""),
+                        privkey_hex=str(dom_obj.get("privkey_hex") or ""),
+                        created_at=float(dom_obj.get("created_at") or time.time()),
+                        updated_at=float(vers[-1].get("created_at") or time.time()) if vers else time.time(),
+                        pinned=is_pinned,
+                    )
+                    for v in vers:
+                        self.index_db.upsert_version(v)
 
     def _index_header_ram(self, h: dict[str, Any]) -> None:
         dom = h["domain"]
@@ -366,7 +386,59 @@ class PeerStore:
             self._index_text_tokens(dom, f"{dom} {header.get('title', '')} {clean_text}")
             if snippet:
                 self.doc_snippets[dom] = snippet
+            self.index_db.upsert_domain(
+                dom,
+                pubkey_hex=str(header.get("pubkey_hex") or ""),
+                privkey_hex=str(self.domains.get(dom, {}).get("privkey_hex") or ""),
+                created_at=float(header.get("created_at") or time.time()),
+                updated_at=float(header.get("created_at") or time.time()),
+                last_accessed=time.time(),
+                pinned=pinned,
+            )
+            self.index_db.upsert_version(header)
+            self.index_db.index_fts(dom, str(header.get("title") or dom), clean_text)
+            if not pinned:
+                self._prune_metadata_if_needed()
             return True
+
+    def _evict_unpinned_domain(self, dom: str) -> None:
+        dom_obj = self.domains.get(dom, {})
+        if dom_obj.get("privkey_hex"):
+            return
+        for v in self.versions.get(dom, []):
+            sha = str(v.get("sha256") or "")
+            if sha:
+                p = self.cache_dir / sha[:2] / f"{sha}.xndz"
+                if p.exists():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+        self.domains.pop(dom, None)
+        self.versions.pop(dom, None)
+        self.doc_tf.pop(dom, None)
+        self.doc_len.pop(dom, None)
+        self.doc_snippets.pop(dom, None)
+        for doms in self.tokens.values():
+            doms.discard(dom)
+        self.index_db.evict_domain(dom)
+
+    def _prune_metadata_if_needed(self) -> int:
+        unpinned_count = self.index_db.count_unpinned_domains()
+        if unpinned_count <= MAX_CACHED_DOMAINS:
+            return 0
+        excess = unpinned_count - int(MAX_CACHED_DOMAINS * 0.9)
+        victims = self.index_db.get_evictable_domains(limit=max(1, excess))
+        evicted = 0
+        for dom in victims:
+            if dom in self.domains and self.domains[dom].get("privkey_hex"):
+                continue
+            pub = str(self.domains.get(dom, {}).get("pubkey_hex") or "").lower()
+            if pub and pub in self.followed_pubkeys:
+                continue
+            self._evict_unpinned_domain(dom)
+            evicted += 1
+        return evicted
 
     def append_link(self, link: dict[str, Any]) -> bool:
         with self.lock:
@@ -376,6 +448,16 @@ class PeerStore:
             with self.links_log.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(link) + "\n")
             self._index_link_ram(link)
+            self.index_db.add_link(
+                str(link.get("source_domain") or ""),
+                int(link.get("source_version") or 1),
+                str(link.get("target_domain") or ""),
+                int(link.get("target_version") or 1),
+                int(link.get("target_start") or 0),
+                int(link.get("target_end") or 0),
+                str(link.get("target_hash") or ""),
+                float(link.get("created_at") or time.time()),
+            )
             return True
 
     def get_version(self, domain: str, version_num: int | None = None) -> dict[str, Any] | None:
@@ -383,6 +465,7 @@ class PeerStore:
             vers = self.versions.get(domain, [])
             if not vers:
                 return None
+            self.index_db.touch_domain(domain)
             if version_num is None:
                 return vers[-1]
             for v in vers:
@@ -430,6 +513,11 @@ class PeerStore:
                     if k_tok.startswith(tok) and k_tok != tok:
                         for dom in doms:
                             scores[dom] = scores.get(dom, 0.0) + 0.8
+
+            # Merge SQLite FTS5 BM25 results so disk-backed/stemmed queries always hit
+            for fts_hit in self.index_db.search_fts(query, limit=30):
+                f_dom = fts_hit["domain"]
+                scores[f_dom] = scores.get(f_dom, 0.0) + float(fts_hit.get("score") or 1.0)
 
             results: list[dict[str, Any]] = []
             for dom, sc in scores.items():
@@ -600,9 +688,12 @@ class PeerStore:
             existed = dom in self.domains or dom in self.versions
             self.domains.pop(dom, None)
             self.versions.pop(dom, None)
+            self.doc_tf.pop(dom, None)
+            self.doc_len.pop(dom, None)
             self.doc_snippets.pop(dom, None)
             for doms in self.tokens.values():
                 doms.discard(dom)
+            self.index_db.evict_domain(dom)
             kf = self.keys_dir / f"{dom}.json"
             if kf.exists():
                 try:
@@ -622,12 +713,17 @@ class PeerStore:
                 self.headers_log.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
             return existed
 
+    def get_manifest_page(self, since: float = 0.0, limit: int = 500) -> tuple[dict[str, dict[str, Any]], float, bool]:
+        return self.index_db.list_manifest_page(since=since, limit=limit)
+
     def storage_stats(self) -> dict[str, Any]:
         pinned_bytes = sum(p.stat().st_size for p in self.pinned_dir.rglob("*.xndz"))
         cache_bytes = self.get_cache_bytes()
         return {
-            "mode": "zero-db-cryptographic-merkle",
+            "mode": "sqlite-fts5-lru-merkle",
             "domains_in_ram": len(self.domains),
+            "unpinned_cached_domains": self.index_db.count_unpinned_domains(),
+            "max_cached_domains": MAX_CACHED_DOMAINS,
             "pinned_kb": round(pinned_bytes / 1024, 2),
             "cache_kb": round(cache_bytes / 1024, 2),
             "mesh_bytes": cache_bytes,

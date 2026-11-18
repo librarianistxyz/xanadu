@@ -1,0 +1,37 @@
+name: Conformance & Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r xnd-hub/requirements.txt
+
+      - name: Set up Java 17 (for Android JVM conformance tests)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build Rust xnd-core
+        run: cargo build --release --manifest-path xnd-core/Cargo.toml
+
+      - name: Run Python unit & sandbox tests
+        run: pytest -v xnd-hub/tests/
+
+      - name: Run cross-language wire conformance suite (Python + Rust + Java)
+        run: python3 spec/verify_conformance.py

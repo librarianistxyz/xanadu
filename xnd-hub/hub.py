@@ -43,6 +43,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -289,6 +290,7 @@ pubkey_limiter = abuse_guard.SlidingWindowLimiter(int(os.environ.get("XND_RATE_P
 blocklist_mgr = abuse_guard.BlocklistManager(DATA_DIR / "state")
 
 app = FastAPI(title="Xanadu Peer Node (.xnd)", version="0.4.0-zerodb")
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 if UI_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
 
@@ -641,6 +643,34 @@ def _remember_seed(url: str, label: str = "Community Seed") -> None:
 
 
 _NEG_RESOLVE_CACHE: dict[str, float] = {}
+
+
+def _try_resolve_from_peers(domain: str) -> bool:
+    """On-demand DNS-style lookup across LAN peers, closest DHT peers, and Seed nodes."""
+    clean = normalize_xnd_domain(domain, append_tld=True)
+    if not clean:
+        return False
+    q_dom = urllib.parse.quote(clean)
+    self_set = _self_urls()
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for p_url in list(_LAN_PEERS.keys()) + _collect_active_peer_urls():
+        u = str(p_url or "").strip().rstrip("/")
+        if u and u not in self_set and u not in seen:
+            seen.add(u)
+            candidates.append(u)
+    candidates.sort(key=lambda u: _dht_distance(u, clean))
+    for peer_url in candidates[:6]:
+        try:
+            raw = _peer_get(peer_url, f"/api/sync/export?domain={q_dom}", timeout=2.5)
+            bundle = json.loads(raw)
+            if isinstance(bundle, dict) and bundle.get("versions"):
+                stats = import_sync_bundle(bundle)
+                if stats.get("imported_versions", 0) > 0 or store.get_version(clean) is not None:
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def _try_resolve_from_nostr(domain: str) -> bool:
@@ -2002,6 +2032,8 @@ def resolve_domain(domain: str, version: int | None = Query(default=None)) -> di
             if base_row is not None:
                 storage_domain = base_dom
                 row = base_row
+    if (row is None or not row.get("pubkey_hex")) and _try_resolve_from_peers(domain):
+        row = store.get_version(domain, version)
     if (row is None or not row.get("pubkey_hex")) and _try_resolve_from_nostr(domain):
         row = store.get_version(domain, version)
         if row is None and parsed_canon:
@@ -2016,6 +2048,8 @@ def resolve_domain(domain: str, version: int | None = Query(default=None)) -> di
         raise HTTPException(status_code=404, detail=f"{domain} not found in .xnd registry")
 
     content = store.get_blob(row.get("sha256", ""))
+    if content is None and (_try_resolve_from_peers(domain) or _try_resolve_from_nostr(domain)):
+        content = store.get_blob(row.get("sha256", ""))
     if content is None:
         raise HTTPException(status_code=404, detail="Blob pruned locally and unavailable from peers")
 
@@ -4742,18 +4776,31 @@ def export_domain_bundle(domain: str) -> dict[str, Any]:
 
 
 @app.get("/api/sync/manifest")
-def sync_manifest() -> dict[str, Any]:
-    dom_map: dict[str, dict[str, Any]] = {}
-    for dom, dom_obj in list(store.domains.items()):
-        vers = store.versions.get(dom, [])
-        if not vers:
-            continue
-        latest = vers[-1]
-        dom_map[dom] = {
-            "latest_version": int(latest.get("version_num", 1)),
-            "sha256": latest.get("sha256", ""),
-            "pubkey_hex": dom_obj.get("pubkey_hex", ""),
-        }
+def sync_manifest(
+    since: float | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+) -> dict[str, Any]:
+    if since is not None or len(store.domains) > limit:
+        cursor = float(since or 0.0)
+        dom_map, next_cursor, has_more = store.get_manifest_page(since=cursor, limit=limit)
+    else:
+        dom_map = {}
+        next_cursor = 0.0
+        has_more = False
+        for dom, dom_obj in list(store.domains.items()):
+            vers = store.versions.get(dom, [])
+            if not vers:
+                continue
+            latest = vers[-1]
+            upd = float(latest.get("created_at") or dom_obj.get("created_at") or 0.0)
+            if upd > next_cursor:
+                next_cursor = upd
+            dom_map[dom] = {
+                "latest_version": int(latest.get("version_num", 1)),
+                "sha256": latest.get("sha256", ""),
+                "pubkey_hex": dom_obj.get("pubkey_hex", ""),
+                "updated_at": upd,
+            }
     return {
         "ok": True,
         "node_id": _get_node_id(),
@@ -4763,6 +4810,8 @@ def sync_manifest() -> dict[str, Any]:
         "seed_node": bool(_SHARE_GATEWAY and _check_has_wan()),
         "dht_k": 3,
         "domains": dom_map,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
         "mesh_bytes": store.get_cache_bytes(),
         "mesh_quota_bytes": MAX_CACHE_BYTES,
     }

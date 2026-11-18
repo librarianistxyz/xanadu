@@ -1,6 +1,36 @@
 # XANADU (`.xnd` Sovereign Hypertext & App Capsule Browser)
 
+[![Conformance & Tests](https://github.com/librarianistxyz/xanadu/actions/workflows/ci.yml/badge.svg)](https://github.com/librarianistxyz/xanadu/actions/workflows/ci.yml)
+
 A domain-free, content-addressed hypertext network, app capsule runtime, and P2P browser built with **Python (FastAPI) + JavaScript + Rust + Android (Java/WebView) + Electron**.
+
+> **Live Read-Only Web Gateway:** Run [`xnd-gateway/`](xnd-gateway/gateway.py) anywhere (`docker compose -f xnd-gateway/docker-compose.yml up -d`) or deploy `xnd-gateway/Dockerfile` to Fly.io / Render so anyone can preview `.xnd` sites (e.g. `/manifesto.xnd`) in a standard browser without installing anything.
+
+---
+
+## Build & Deploy a `.xnd` App in 60 Seconds
+
+Start a local node and deploy [`examples/hello-capsule/`](examples/hello-capsule/) (a sovereign HTML frontend + sandboxed Python `backend.py` + per-capsule SQLite):
+
+```bash
+# 1. Start your local node
+cd xnd-hub && pip install -r requirements.txt && python3 hub.py
+
+# 2. Configure the zero-dependency CLI & deploy the starter capsule
+./xnd-cli/xnd login --hub http://127.0.0.1:8765 --domain hello-capsule.xnd
+./xnd-cli/xnd deploy ./examples/hello-capsule --domain hello-capsule.xnd --title "Hello Capsule"
+```
+
+Open `http://127.0.0.1:8765/xnd-app/hello-capsule.xnd` in your browser. Here is the entire `backend.py` ([`examples/hello-capsule/backend.py`](examples/hello-capsule/backend.py)):
+
+```python
+def handle(method, path, headers, body, state):
+    db.exec("CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT)")
+    if method == "POST":
+        db.exec("INSERT INTO visits (ts) VALUES (?)", [str((body or {}).get("note") or "ping")[:120]])
+    rows = db.query("SELECT id, ts FROM visits ORDER BY id DESC LIMIT 10")["rows"]
+    return {"status": 200, "body": {"visits": rows, "count": len(rows)}}
+```
 
 ---
 
