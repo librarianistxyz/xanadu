@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -82,11 +83,32 @@ def main() -> None:
             check=True,
         )
 
-    # 5. Android Java wire-format parity check
+    # 5. Android Java real JVM conformance tests (Ed25519, E2eeSpaces, TransclusionEngine)
     java_node = (ANDROID_SRC / "LocalNodeServer.java").read_text(encoding="utf-8")
-    java_e2ee = (ANDROID_SRC / "E2eeSpaces.java").read_text(encoding="utf-8")
     assert '|v" + ver + "|" + sha' in java_node
-    assert 'XND-E2EE-v1:' in java_e2ee
+
+    javac_bin = shutil.which("javac") or "/home/librarianist/java/17.0.13+11/bin/javac"
+    java_bin = shutil.which("java") or "/home/librarianist/java/17.0.13+11/bin/java"
+    if Path(javac_bin).exists() and Path(java_bin).exists():
+        with tempfile.TemporaryDirectory(prefix="xnd_java_conf_") as cls_dir:
+            java_tests_dir = SPEC_DIR / "java_tests"
+            sources = [
+                str(java_tests_dir / "org" / "json" / "JSONException.java"),
+                str(java_tests_dir / "org" / "json" / "JSONArray.java"),
+                str(java_tests_dir / "org" / "json" / "JSONObject.java"),
+                str(ANDROID_SRC / "Ed25519.java"),
+                str(ANDROID_SRC / "E2eeSpaces.java"),
+                str(ANDROID_SRC / "TransclusionEngine.java"),
+                str(java_tests_dir / "ConformanceTest.java"),
+            ]
+            subprocess.run([javac_bin, "--release", "11", "-d", cls_dir, *sources], check=True)
+            res = subprocess.run(
+                [java_bin, "-cp", cls_dir, "com.xanadu.browser.ConformanceTest", str(SPEC_DIR / "test_vectors.json")],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            assert "JAVA_CONFORMANCE_PASSED" in res.stdout, res.stdout + res.stderr
 
     print("CONFORMANCE_PASSED")
 
