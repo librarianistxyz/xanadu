@@ -144,10 +144,9 @@ def _ws_connect(wss_url: str, timeout: float = 4.0) -> ssl.SSLSocket | socket.so
     return sock
 
 
-def _ws_send_text(sock: ssl.SSLSocket | socket.socket, text: str) -> None:
-    payload = text.encode("utf-8")
+def _ws_send_frame(sock: ssl.SSLSocket | socket.socket, opcode: int, payload: bytes) -> None:
     mask = os.urandom(4)
-    header = bytearray([0x81])
+    header = bytearray([0x80 | (opcode & 0x0F)])
     length = len(payload)
     if length < 126:
         header.append(0x80 | length)
@@ -160,6 +159,10 @@ def _ws_send_text(sock: ssl.SSLSocket | socket.socket, text: str) -> None:
     header.extend(mask)
     masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
     sock.sendall(bytes(header) + masked)
+
+
+def _ws_send_text(sock: ssl.SSLSocket | socket.socket, text: str) -> None:
+    _ws_send_frame(sock, 0x1, text.encode("utf-8"))
 
 
 def _recv_exact(sock: ssl.SSLSocket | socket.socket, n: int) -> bytes:
@@ -462,10 +465,13 @@ def _events_to_sync_bundle(
                 sig = str(data.get("signature_hex", "")).strip()
                 txt = str(data.get("content", ""))
                 ver = int(data.get("version_num", 1))
-                ts = float(data.get("created_at", time.time()))
+                ev_ts = float(ev.get("created_at") or data.get("created_at") or time.time())
+                ts = float(data.get("created_at") or ev_ts)
                 if not dom or not sha or not pub or not sig or not txt:
                     continue
-                domains[dom] = {"name": dom, "pubkey_hex": pub, "created_at": ts}
+                prev_dom = domains.get(dom)
+                if not prev_dom or ev_ts < float(prev_dom.get("created_at") or ev_ts):
+                    domains[dom] = {"name": dom, "pubkey_hex": pub, "created_at": ev_ts, "nostr_ts": ev_ts, "verified_ts": True}
                 versions[(dom, ver)] = {
                     "domain": dom,
                     "version_num": ver,
@@ -518,7 +524,9 @@ def _events_to_sync_bundle(
                 continue
             if all(c in chunks_map for c in c_list):
                 txt = b"".join(chunks_map[c] for c in c_list).decode("utf-8", errors="replace")
-                domains[dom] = {"name": dom, "pubkey_hex": pub, "created_at": ts}
+                prev_dom = domains.get(dom)
+                if not prev_dom or ts < float(prev_dom.get("created_at") or ts):
+                    domains[dom] = {"name": dom, "pubkey_hex": pub, "created_at": ts, "nostr_ts": ts, "verified_ts": True}
                 versions[(dom, ver)] = {
                     "domain": dom,
                     "version_num": ver,
@@ -571,6 +579,95 @@ def lookup_doc_nostr(domain: str, relays: list[str] | None = None) -> dict[str, 
         timeout=2.5,
     )
     return _events_to_sync_bundle(events, relays=relays, fetch_missing_chunks=True)
+
+
+def subscribe_docs_nostr(
+    on_bundle: Any,
+    relays: list[str] | None = None,
+    stop_event: threading.Event | None = None,
+) -> list[threading.Thread]:
+    """Maintain persistent WebSocket subscriptions to Nostr relays for ms-level .xnd updates."""
+    from collections import deque
+
+    relay_list = list(relays or DEFAULT_RELAYS)
+    seen_ids: deque[str] = deque(maxlen=2000)
+    seen_set: set[str] = set()
+    seen_lock = threading.Lock()
+
+    def _mark_seen(ev_id: str) -> bool:
+        if not ev_id:
+            return False
+        with seen_lock:
+            if ev_id in seen_set:
+                return False
+            if len(seen_ids) >= 2000:
+                oldest = seen_ids.popleft()
+                seen_set.discard(oldest)
+            seen_ids.append(ev_id)
+            seen_set.add(ev_id)
+            return True
+
+    def _relay_loop(r_url: str) -> None:
+        backoff = 3.0
+        last_since = int(time.time()) - 120
+        while not (stop_event and stop_event.is_set()):
+            sock: ssl.SSLSocket | socket.socket | None = None
+            try:
+                sock = _ws_connect(r_url, timeout=45.0)
+                backoff = 3.0
+                sub_id = f"xnd-live-{secrets.token_hex(4)}"
+                _ws_send_text(
+                    sock,
+                    json.dumps(["REQ", sub_id, {"kinds": [30078, 1], "#t": [XANADU_DOC_TAG], "since": last_since}]),
+                )
+                while not (stop_event and stop_event.is_set()):
+                    try:
+                        msg = _ws_recv_text(sock)
+                    except (TimeoutError, socket.timeout):
+                        _ws_send_frame(sock, 0x9, b"ping")
+                        continue
+                    if msg is None:
+                        break
+                    if msg == "":
+                        _ws_send_frame(sock, 0xA, b"")
+                        continue
+                    try:
+                        arr = json.loads(msg)
+                    except Exception:
+                        continue
+                    if isinstance(arr, list) and len(arr) >= 3 and arr[0] == "EVENT" and isinstance(arr[2], dict):
+                        ev = arr[2]
+                        ev_id = str(ev.get("id") or "")
+                        ev_ts = int(ev.get("created_at") or 0)
+                        if ev_ts > last_since:
+                            last_since = ev_ts
+                        if not _mark_seen(ev_id):
+                            continue
+                        bundle = _events_to_sync_bundle([ev], relays=[r_url], fetch_missing_chunks=True)
+                        if bundle.get("versions"):
+                            try:
+                                on_bundle(bundle)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+            if stop_event and stop_event.is_set():
+                break
+            time.sleep(backoff)
+            backoff = min(30.0, backoff * 1.5)
+
+    threads: list[threading.Thread] = []
+    for url in relay_list:
+        t = threading.Thread(target=_relay_loop, args=(url,), daemon=True, name=f"nostr-live-{url}")
+        t.start()
+        threads.append(t)
+    return threads
 
 
 def start_lan_discovery(http_port: int, on_peer_found: Any, label: str = "Xanadu Desktop") -> None:

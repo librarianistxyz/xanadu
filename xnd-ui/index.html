@@ -322,6 +322,15 @@
       </div>
       <div id="sync-status" style="margin-top:12px;font-family:var(--font-mono);font-size:12px;color:var(--faded-ink);"></div>
       <div id="sync-peers-list" style="margin-top:10px;max-height:170px;overflow:auto;font-size:12px;"></div>
+      <hr style="border:none;border-top:1px solid rgba(128,128,128,0.2);margin:14px 0;" />
+      <div>
+        <div style="font-family:var(--font-mono);font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;margin-bottom:6px;">Always-On Seed &amp; DHT Relay Nodes</div>
+        <div id="sync-seeds-list" style="font-size:12px;color:var(--muted);margin-bottom:8px;">Checking seed nodes...</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <input id="seed-node-url" type="text" placeholder="https://seed.example.com (always-on community seed)" style="flex:1;min-width:200px;margin-top:0;" />
+          <button type="button" class="btn-tool" onclick="addCommunitySeed()">+ Add Seed</button>
+        </div>
+      </div>
       <div id="sync-moderation-list" style="margin-top:10px;max-height:130px;overflow:auto;font-size:12px;"></div>
     </div>
   </div>

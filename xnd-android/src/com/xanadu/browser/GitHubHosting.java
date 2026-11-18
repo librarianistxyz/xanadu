@@ -37,6 +37,8 @@ public class GitHubHosting {
     private final File linksFile;
     private volatile String activeDeviceCode = "";
     private final Object pollLock = new Object();
+    private volatile long lastPollMs = 0L;
+    private volatile long minPollIntervalMs = 5000L;
 
     public GitHubHosting(File dataDir) {
         this.authFile = new File(dataDir, "github_auth.json");
@@ -44,13 +46,33 @@ public class GitHubHosting {
     }
 
     public synchronized JSONObject loadLinks() {
-        try {
-            if (!linksFile.exists()) return new JSONObject();
-            byte[] b = Files.readAllBytes(linksFile.toPath());
-            return new JSONObject(new String(b, StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            return new JSONObject();
+        for (File f : new File[]{linksFile, new File(linksFile.getParentFile(), "github_links.bak.json")}) {
+            try {
+                if (!f.exists()) continue;
+                byte[] b = Files.readAllBytes(f.toPath());
+                JSONObject obj = new JSONObject(new String(b, StandardCharsets.UTF_8));
+                if (obj.length() > 0 || f.equals(linksFile)) return obj;
+            } catch (Exception ignored) {
+            }
         }
+        return new JSONObject();
+    }
+
+    private void writeLinksAtomic(JSONObject links) throws Exception {
+        byte[] bytes = links.toString().getBytes(StandardCharsets.UTF_8);
+        File tmp = new File(linksFile.getParentFile(), "github_links.json.tmp");
+        try (OutputStream os = new java.io.FileOutputStream(tmp)) {
+            os.write(bytes);
+        }
+        if (!tmp.renameTo(linksFile)) {
+            try (OutputStream os = new java.io.FileOutputStream(linksFile)) {
+                os.write(bytes);
+            }
+        }
+        File bak = new File(linksFile.getParentFile(), "github_links.bak.json");
+        try (OutputStream os = new java.io.FileOutputStream(bak)) {
+            os.write(bytes);
+        } catch (Exception ignored) {}
     }
 
     public synchronized void saveLink(String domain, String repo, String branch, String subdir, String sha) {
@@ -65,9 +87,7 @@ public class GitHubHosting {
             item.put("locked", true);
             item.put("updated_at", System.currentTimeMillis() / 1000.0);
             links.put(domain, item);
-            try (OutputStream os = new java.io.FileOutputStream(linksFile)) {
-                os.write(links.toString().getBytes(StandardCharsets.UTF_8));
-            }
+            writeLinksAtomic(links);
         } catch (Exception ignored) {}
     }
 
@@ -76,9 +96,7 @@ public class GitHubHosting {
             JSONObject links = loadLinks();
             if (!links.has(domain)) return false;
             links.remove(domain);
-            try (OutputStream os = new java.io.FileOutputStream(linksFile)) {
-                os.write(links.toString().getBytes(StandardCharsets.UTF_8));
-            }
+            writeLinksAtomic(links);
             return true;
         } catch (Exception e) {
             return false;
@@ -162,7 +180,7 @@ public class GitHubHosting {
 
     public JSONObject startDeviceFlow() throws Exception {
         String form = "client_id=" + URLEncoder.encode(GITHUB_CLIENT_ID, "UTF-8")
-                + "&scope=" + URLEncoder.encode("repo", "UTF-8");
+                + "&scope=" + URLEncoder.encode("repo workflow", "UTF-8");
         HttpRes res = postForm("https://github.com/login/device/code", form);
         if (res.code != 200) {
             throw new IllegalArgumentException("Failed to start GitHub Device Login (" + res.code + ").");
@@ -219,6 +237,11 @@ public class GitHubHosting {
                 cur.put("ok", true).put("status", "authorized");
                 return cur;
             }
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - lastPollMs < minPollIntervalMs) {
+                return new JSONObject().put("ok", true).put("status", "pending");
+            }
+            lastPollMs = nowMs;
             String form = "client_id=" + URLEncoder.encode(GITHUB_CLIENT_ID, "UTF-8")
                     + "&device_code=" + URLEncoder.encode(code, "UTF-8")
                     + "&grant_type=" + URLEncoder.encode("urn:ietf:params:oauth:grant-type:device_code", "UTF-8");
@@ -231,6 +254,7 @@ public class GitHubHosting {
             if (!accessToken.isEmpty()) {
                 JSONObject st = connect(accessToken);
                 activeDeviceCode = "";
+                minPollIntervalMs = 5000L;
                 st.put("ok", true).put("status", "authorized");
                 return st;
             }
@@ -239,7 +263,9 @@ public class GitHubHosting {
                 return new JSONObject().put("ok", true).put("status", "pending");
             }
             if ("slow_down".equals(err)) {
-                return new JSONObject().put("ok", true).put("status", "slow_down").put("interval", d.optInt("interval", 10));
+                int iv = Math.max(10, d.optInt("interval", 10));
+                minPollIntervalMs = iv * 1000L;
+                return new JSONObject().put("ok", true).put("status", "slow_down").put("interval", iv);
             }
             throw new IllegalArgumentException(d.optString("error_description", err.isEmpty() ? "GitHub authorization denied" : err));
         }
@@ -549,6 +575,9 @@ public class GitHubHosting {
 
         HttpRes pr = request("PUT", url, tok, payload.toString());
         if (pr.code < 200 || pr.code >= 300) {
+            if (pr.code == 403 || pr.code == 404) {
+                throw new IllegalArgumentException("Failed to install workflow (" + pr.code + "): GitHub requires the 'workflow' scope. Disconnect and Sign in with GitHub again.");
+            }
             throw new IllegalArgumentException("Failed to install workflow (" + pr.code + "). Ensure repo write permission.");
         }
         try {

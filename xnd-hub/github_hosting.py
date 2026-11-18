@@ -71,38 +71,120 @@ class GitHubHosting:
     def __init__(self, data_dir: Path) -> None:
         self.auth_path = data_dir / "github_auth.json"
         self.links_path = data_dir / "github_links.json"
+        self.links_bak_path = data_dir / "github_links.bak.json"
         self._active_device_code = ""
         self._poll_lock = threading.Lock()
+        self._links_lock = threading.Lock()
+        self._last_poll_ts = 0.0
+        self._min_poll_interval = 5.0
+
+    @staticmethod
+    def _request_with_retry(
+        client: httpx.Client,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        attempts: int = 3,
+        follow_redirects: bool = False,
+        timeout: float = 20.0,
+    ) -> httpx.Response:
+        last_err: Exception | None = None
+        for idx in range(attempts):
+            try:
+                if idx == 0:
+                    return client.request(
+                        method,
+                        url,
+                        headers=headers,
+                        params=params,
+                        data=data,
+                        json=json_body,
+                    )
+                # Fallback to IPv4-only transport on retry to bypass broken IPv6/AAAA DNS resolution
+                with httpx.Client(
+                    transport=httpx.HTTPTransport(local_address="0.0.0.0"),
+                    timeout=timeout,
+                    follow_redirects=follow_redirects,
+                ) as v4_client:
+                    return v4_client.request(
+                        method,
+                        url,
+                        headers=headers,
+                        params=params,
+                        data=data,
+                        json=json_body,
+                    )
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                last_err = e
+                if idx + 1 < attempts:
+                    time.sleep(0.4 * (idx + 1))
+        raise ValueError(f"Cannot reach GitHub (DNS/network offline: {last_err}). Check your internet connection and retry.")
+
+    @classmethod
+    def _get_with_retry(cls, client: httpx.Client, url: str, headers: dict[str, str], params: dict[str, Any] | None = None, attempts: int = 3) -> httpx.Response:
+        return cls._request_with_retry(
+            client,
+            "GET",
+            url,
+            headers=headers,
+            params=params,
+            attempts=attempts,
+            follow_redirects=True,
+            timeout=30.0,
+        )
+
+    def _load_links_unlocked(self) -> dict[str, dict[str, Any]]:
+        for p in (self.links_path, self.links_bak_path):
+            if not p.exists():
+                continue
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and (data or p == self.links_path):
+                    return data
+            except Exception:
+                continue
+        return {}
 
     def load_links(self) -> dict[str, dict[str, Any]]:
-        if not self.links_path.exists():
-            return {}
-        try:
-            data = json.loads(self.links_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
+        with self._links_lock:
+            return self._load_links_unlocked()
+
+    def _write_links_unlocked(self, links: dict[str, dict[str, Any]]) -> None:
+        payload = json.dumps(links, indent=2)
+        self.links_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.links_path.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(self.links_path)
+        bak_tmp = self.links_bak_path.with_suffix(".tmp")
+        bak_tmp.write_text(payload, encoding="utf-8")
+        bak_tmp.replace(self.links_bak_path)
 
     def save_link(self, domain: str, repo: str, branch: str, subdir: str, sha: str) -> None:
-        links = self.load_links()
-        links[domain] = {
-            "domain": domain,
-            "repo": repo,
-            "branch": branch,
-            "subdir": subdir,
-            "last_sha": sha,
-            "locked": True,
-            "updated_at": time.time(),
-        }
-        self.links_path.write_text(json.dumps(links, indent=2), encoding="utf-8")
+        with self._links_lock:
+            links = self._load_links_unlocked()
+            links[domain] = {
+                "domain": domain,
+                "repo": repo,
+                "branch": branch,
+                "subdir": subdir,
+                "last_sha": sha,
+                "locked": True,
+                "updated_at": time.time(),
+            }
+            self._write_links_unlocked(links)
 
     def remove_link(self, domain: str) -> bool:
-        links = self.load_links()
-        if domain in links:
-            links.pop(domain, None)
-            self.links_path.write_text(json.dumps(links, indent=2), encoding="utf-8")
-            return True
-        return False
+        with self._links_lock:
+            links = self._load_links_unlocked()
+            if domain in links:
+                links.pop(domain, None)
+                self._write_links_unlocked(links)
+                return True
+            return False
 
     def get_latest_commit_sha(self, repo: str, branch: str) -> str:
         clean_repo = (repo or "").strip()
@@ -155,7 +237,7 @@ class GitHubHosting:
         if not tok:
             raise ValueError("GitHub Personal Access Token is required.")
         with httpx.Client(timeout=12.0) as client:
-            r = client.get(f"{GITHUB_API}/user", headers=self._headers(tok))
+            r = self._request_with_retry(client, "GET", f"{GITHUB_API}/user", headers=self._headers(tok), timeout=12.0)
         if r.status_code != 200:
             raise ValueError(f"GitHub authentication failed ({r.status_code}). Check your token and scopes.")
         u = r.json()
@@ -180,10 +262,13 @@ class GitHubHosting:
 
     def start_device_flow(self) -> dict[str, Any]:
         with httpx.Client(timeout=12.0) as client:
-            r = client.post(
+            r = self._request_with_retry(
+                client,
+                "POST",
                 "https://github.com/login/device/code",
                 headers={"Accept": "application/json"},
-                data={"client_id": GITHUB_CLIENT_ID, "scope": "repo"},
+                data={"client_id": GITHUB_CLIENT_ID, "scope": "repo workflow"},
+                timeout=12.0,
             )
         if r.status_code != 200:
             raise ValueError(f"Failed to start GitHub Device Login ({r.status_code}).")
@@ -232,8 +317,14 @@ class GitHubHosting:
             st_cur = self.get_status()
             if st_cur.get("connected") and self._active_device_code != code:
                 return {"ok": True, "status": "authorized", **st_cur}
+            now = time.time()
+            if now - self._last_poll_ts < self._min_poll_interval:
+                return {"ok": True, "status": "pending"}
+            self._last_poll_ts = now
             with httpx.Client(timeout=12.0) as client:
-                r = client.post(
+                r = self._request_with_retry(
+                    client,
+                    "POST",
                     "https://github.com/login/oauth/access_token",
                     headers={"Accept": "application/json"},
                     data={
@@ -241,6 +332,7 @@ class GitHubHosting:
                         "device_code": code,
                         "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                     },
+                    timeout=12.0,
                 )
             if r.status_code != 200:
                 raise ValueError(f"GitHub token poll failed ({r.status_code}).")
@@ -248,18 +340,22 @@ class GitHubHosting:
             if d.get("access_token"):
                 st = self.connect(d["access_token"])
                 self._active_device_code = ""
+                self._min_poll_interval = 5.0
                 return {"ok": True, "status": "authorized", **st}
             err = d.get("error", "")
             if err == "authorization_pending":
                 return {"ok": True, "status": "pending"}
             if err == "slow_down":
-                return {"ok": True, "status": "slow_down", "interval": int(d.get("interval", 10))}
+                self._min_poll_interval = max(10.0, float(d.get("interval", 10)))
+                return {"ok": True, "status": "slow_down", "interval": int(self._min_poll_interval)}
             raise ValueError(d.get("error_description") or err or "GitHub authorization denied")
 
     def list_repos(self) -> list[dict[str, Any]]:
         headers = self._headers()
         with httpx.Client(timeout=15.0) as client:
-            r = client.get(
+            r = self._request_with_retry(
+                client,
+                "GET",
                 f"{GITHUB_API}/user/repos",
                 params={
                     "per_page": 100,
@@ -267,6 +363,7 @@ class GitHubHosting:
                     "affiliation": "owner,collaborator,organization_member",
                 },
                 headers=headers,
+                timeout=15.0,
             )
         if r.status_code != 200:
             raise ValueError(f"Failed to list GitHub repositories ({r.status_code}).")
@@ -295,12 +392,12 @@ class GitHubHosting:
 
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             if not clean_branch:
-                rr = client.get(f"{GITHUB_API}/repos/{clean_repo}", headers=headers)
+                rr = self._get_with_retry(client, f"{GITHUB_API}/repos/{clean_repo}", headers=headers)
                 if rr.status_code != 200:
                     raise ValueError(f"Repository '{clean_repo}' not accessible ({rr.status_code}).")
                 clean_branch = rr.json().get("default_branch") or "main"
 
-            zr = client.get(f"{GITHUB_API}/repos/{clean_repo}/zipball/{clean_branch}", headers=headers)
+            zr = self._get_with_retry(client, f"{GITHUB_API}/repos/{clean_repo}/zipball/{clean_branch}", headers=headers)
             if zr.status_code != 200:
                 raise ValueError(f"Could not download branch '{clean_branch}' archive ({zr.status_code}).")
 
@@ -391,7 +488,7 @@ class GitHubHosting:
         clean_branch = (branch or "").strip()
         with httpx.Client(timeout=20.0) as client:
             if not clean_branch:
-                rr = client.get(f"{GITHUB_API}/repos/{clean_repo}", headers=headers)
+                rr = self._request_with_retry(client, "GET", f"{GITHUB_API}/repos/{clean_repo}", headers=headers, timeout=20.0)
                 if rr.status_code != 200:
                     raise ValueError(f"Repository '{clean_repo}' not accessible ({rr.status_code}).")
                 clean_branch = rr.json().get("default_branch") or "main"
@@ -417,7 +514,7 @@ class GitHubHosting:
             )
             url = f"{GITHUB_API}/repos/{clean_repo}/contents/{wf_path}"
             existing_sha = None
-            gr = client.get(url, headers=headers, params={"ref": clean_branch})
+            gr = self._request_with_retry(client, "GET", url, headers=headers, params={"ref": clean_branch}, timeout=20.0)
             if gr.status_code == 200:
                 existing_sha = gr.json().get("sha")
             payload: dict[str, Any] = {
@@ -427,15 +524,20 @@ class GitHubHosting:
             }
             if existing_sha:
                 payload["sha"] = existing_sha
-            pr = client.put(url, headers=headers, json=payload)
+            pr = self._request_with_retry(client, "PUT", url, headers=headers, json_body=payload, timeout=20.0)
             if pr.status_code not in (200, 201):
+                if pr.status_code in (403, 404):
+                    raise ValueError(f"Failed to install workflow ({pr.status_code}): GitHub requires the 'workflow' scope. Disconnect and Sign in with GitHub again.")
                 raise ValueError(f"Failed to install workflow ({pr.status_code}): {pr.text[:200]}")
 
             # Trigger workflow immediately
-            client.post(
+            self._request_with_retry(
+                client,
+                "POST",
                 f"{GITHUB_API}/repos/{clean_repo}/actions/workflows/xanadu-build.yml/dispatches",
                 headers=headers,
-                json={"ref": clean_branch},
+                json_body={"ref": clean_branch},
+                timeout=20.0,
             )
         return {"ok": True, "repo": clean_repo, "branch": clean_branch, "workflow": wf_path}
 
@@ -462,7 +564,7 @@ class GitHubHosting:
         last_commit_url = ""
         with httpx.Client(timeout=20.0) as client:
             if not clean_branch:
-                rr = client.get(f"{GITHUB_API}/repos/{clean_repo}", headers=headers)
+                rr = self._request_with_retry(client, "GET", f"{GITHUB_API}/repos/{clean_repo}", headers=headers, timeout=20.0)
                 if rr.status_code != 200:
                     raise ValueError(f"Repository '{clean_repo}' not accessible ({rr.status_code}).")
                 clean_branch = rr.json().get("default_branch") or "main"
@@ -474,10 +576,13 @@ class GitHubHosting:
                 target_path = f"{clean_sub}/{clean_rel}" if clean_sub else clean_rel
 
                 existing_sha = None
-                gr = client.get(
+                gr = self._request_with_retry(
+                    client,
+                    "GET",
                     f"{GITHUB_API}/repos/{clean_repo}/contents/{target_path}",
                     params={"ref": clean_branch},
                     headers=headers,
+                    timeout=20.0,
                 )
                 if gr.status_code == 200:
                     existing_sha = gr.json().get("sha")
@@ -495,10 +600,13 @@ class GitHubHosting:
                 if existing_sha:
                     body["sha"] = existing_sha
 
-                pr = client.put(
+                pr = self._request_with_retry(
+                    client,
+                    "PUT",
                     f"{GITHUB_API}/repos/{clean_repo}/contents/{target_path}",
-                    json=body,
+                    json_body=body,
                     headers=headers,
+                    timeout=20.0,
                 )
                 if pr.status_code not in (200, 201):
                     detail = pr.json().get("message", pr.text)

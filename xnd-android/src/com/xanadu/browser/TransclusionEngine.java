@@ -16,7 +16,7 @@ import java.util.regex.Pattern;
  */
 public final class TransclusionEngine {
     public static final Pattern TRANSCLUSION_RE = Pattern.compile(
-            "\\{\\{xnd://([a-z0-9.-]+\\.xnd)(?:@v(\\d+))?(?:#([0-9a-fA-F]{6,64}))?:(\\d+)-(\\d+)\\}\\}",
+            "\\{\\{\\s*xnd://([a-z0-9.-]+\\.xnd)(?:@v(\\d+))?(?:#([0-9a-fA-F]{6,64}))?(?::(\\d+)-(\\d+))?\\s*\\}\\}",
             Pattern.CASE_INSENSITIVE
     );
 
@@ -52,11 +52,11 @@ public final class TransclusionEngine {
             }
             String tDomain = m.group(1).toLowerCase(Locale.US);
             String expectedHash = m.group(3) != null ? m.group(3).toLowerCase(Locale.US) : "";
-            int reqStart = Integer.parseInt(m.group(4));
-            int reqEnd = Integer.parseInt(m.group(5));
             JSONObject targetDoc = docs != null ? docs.get(tDomain) : null;
             String tText = targetDoc != null ? targetDoc.optString("raw_content", "") : null;
             if (targetDoc != null && tText != null) {
+                int reqStart = m.group(4) != null ? Integer.parseInt(m.group(4)) : 0;
+                int reqEnd = m.group(5) != null ? Integer.parseInt(m.group(5)) : tText.length();
                 int s = Math.max(0, Math.min(reqStart, tText.length()));
                 int e = Math.max(s, Math.min(reqEnd, tText.length()));
                 String actualHash = targetDoc.optString("sha256", "").toLowerCase(Locale.US);
@@ -122,8 +122,8 @@ public final class TransclusionEngine {
                                 .put("target_hash", m.group(3) != null ? m.group(3).toLowerCase(Locale.US) : "")
                                 .put("source_start", m.start())
                                 .put("source_end", m.end())
-                                .put("target_start", Integer.parseInt(m.group(4)))
-                                .put("target_end", Integer.parseInt(m.group(5)))
+                                .put("target_start", m.group(4) != null ? Integer.parseInt(m.group(4)) : 0)
+                                .put("target_end", m.group(5) != null ? Integer.parseInt(m.group(5)) : 0)
                                 .put("link_type", "transclusion"));
                     } catch (Exception ignored) {}
                 }

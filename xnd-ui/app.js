@@ -482,10 +482,14 @@ async function openHomeFeed(category = "top") {
       return;
     }
 
-    const gwBadge = window._xndMeshGatewayLabel ? `<span class="news-fresh-badge" style="margin-left:8px;">🌐 Mesh Internet via ${escapeHtml(window._xndMeshGatewayLabel)}</span>` : "";
+    const gwBadge = window._xndMeshGatewayLabel ? `<span class="news-fresh-badge" style="margin-left:8px;">Mesh Internet via ${escapeHtml(window._xndMeshGatewayLabel)}</span>` : "";
+    const hostSiteBtn = `<button type="button" class="ver-btn" style="display:inline-flex;align-items:center;gap:6px;" onclick="openCloudflareDashboard('', 'register')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Host Free .xnd Site</button>`;
     primaryContent.innerHTML = `<div class="doc-sheet">
       <div class="doc-header" style="border-bottom:none;padding-bottom:8px;">
-        <h1 class="doc-title" style="font-size:clamp(28px,4vw,38px);margin-bottom:10px;">Xanadu${gwBadge}</h1>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+          <h1 class="doc-title" style="font-size:clamp(28px,4vw,38px);margin:0;">Xanadu${gwBadge}</h1>
+          ${hostSiteBtn}
+        </div>
         <div class="news-cats">${pillsHtml}<button class="ver-btn" onclick="renderNewsCardsAnimated(homeStoriesPool)">↻ Shuffle</button></div>
       </div>
       <div id="home-news-grid" class="news-grid"></div>
@@ -1361,7 +1365,9 @@ function renderSearchResults(query, activeTab, data, isLoadingExternal = false) 
             .join("")}
         </div>
       </div>`
-    : (activeTab === "images" ? `<p style="color:var(--muted);">No images found for "${escapeHtml(query)}".</p>` : "");
+    : (isLoadingExternal && activeTab === "images"
+        ? renderSkeletonCards(3)
+        : (activeTab === "images" ? `<p style="color:var(--muted);">No images found for "${escapeHtml(query)}".</p>` : ""));
 
   const forumsHtml = forums.length
     ? `<div style="margin-bottom:24px;">
@@ -1485,18 +1491,20 @@ function renderSearchResults(query, activeTab, data, isLoadingExternal = false) 
       </div>`
     : "";
 
+  const externalSkeletonHtml = isLoadingExternal && !webSenses.length ? renderSkeletonCards(3) : "";
+
   let bodyContent = "";
   if (activeTab === "images") {
     bodyContent = imagesHtml;
   } else if (activeTab === "forums") {
     bodyContent = forumsHtml;
   } else if (activeTab === "news") {
-    bodyContent = sensesHtml || `<p style="color:var(--muted);">No live news matched "${escapeHtml(query)}".</p>`;
+    bodyContent = sensesHtml || (isLoadingExternal ? renderSkeletonCards(3) : `<p style="color:var(--muted);">No live news matched "${escapeHtml(query)}".</p>`);
   } else if (activeTab === "web") {
     bodyContent = `
       <div class="search-layout">
-        <div class="search-main">${knowledgeCardHtml}${alternativesHtml}${deepPassagesHtml}${sensesHtml || `<p style="color:var(--muted);">No web knowledge results matched "${escapeHtml(query)}".</p>`}</div>
-        ${items.length ? `<aside class="desktop-aside">${xndSideHtml}</aside>` : ""}
+        <div class="search-main">${knowledgeCardHtml}${alternativesHtml}${deepPassagesHtml}${sensesHtml || (isLoadingExternal ? renderSkeletonCards(3) : `<p style="color:var(--muted);">No web knowledge results matched "${escapeHtml(query)}".</p>`)}</div>
+        ${items.length || isLoadingExternal ? `<aside class="desktop-aside">${xndSideHtml}</aside>` : ""}
       </div>`;
   } else {
     bodyContent = `
@@ -1506,9 +1514,10 @@ function renderSearchResults(query, activeTab, data, isLoadingExternal = false) 
           ${alternativesHtml}
           ${deepPassagesHtml}
           ${sensesHtml}
+          ${externalSkeletonHtml}
           ${imagesHtml}
         </div>
-        ${items.length ? `<aside class="desktop-aside">${xndSideHtml}</aside>` : ""}
+        ${items.length || isLoadingExternal ? `<aside class="desktop-aside">${xndSideHtml}</aside>` : ""}
       </div>`;
   }
 
@@ -1881,12 +1890,25 @@ const syncPeersList = document.getElementById("sync-peers-list");
 const syncModerationList = document.getElementById("sync-moderation-list");
 
 async function refreshSyncModal() {
-  const [pr, mr, lr, gr] = await Promise.all([
+  const [pr, mr, lr, gr, sr] = await Promise.all([
     fetch("/api/peers"),
     fetch("/api/moderation"),
     fetch("/api/lan/peers"),
     fetch("/api/gateway/status").catch(() => null),
+    fetch("/api/seeds").catch(() => null),
   ]);
+  if (sr && sr.ok) {
+    const sd = await sr.json().catch(() => null);
+    const seedsEl = document.getElementById("sync-seeds-list");
+    if (sd && seedsEl) {
+      const seeds = sd.seeds || [];
+      const selfNote = sd.self_seed_active ? "This node is acting as an active Always-On Seed & DHT relay." : "Add an always-on community seed node for NAT/offline reachability.";
+      seedsEl.innerHTML = `<div style="margin-bottom:4px;">${escapeHtml(selfNote)}</div>` +
+        (seeds.length
+          ? seeds.map((s) => `<div style="font-family:var(--font-mono);font-size:11.5px;padding:2px 0;">• ${escapeHtml(s.label || "Community Seed")}</div>`).join("")
+          : "");
+    }
+  }
   if (gr && gr.ok) {
     const gs = await gr.json().catch(() => null);
     const gwSt = document.getElementById("sync-gateway-status");
@@ -1899,7 +1921,7 @@ async function refreshSyncModal() {
           ? "Online — sharing web, search & news with offline LAN peers."
           : "Online — internet sharing paused.";
       } else if (gs.active_gateway) {
-        gwSt.textContent = `Offline — browsing via ${gs.active_gateway.label || "LAN Peer"} (${gs.active_gateway.url}).`;
+        gwSt.textContent = `Offline — browsing via ${gs.active_gateway.label || "LAN Peer"}.`;
       } else {
         gwSt.textContent = "Offline — no online LAN peer sharing internet yet.";
       }
@@ -1914,7 +1936,7 @@ async function refreshSyncModal() {
         ? lp
             .map(
               (p) => `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.12);">
-                <span style="font-family:var(--font-mono);"><span style="color:#22c55e;">●</span> ${escapeHtml(p.label || "LAN Peer")} · ${escapeHtml(p.url)}</span>
+                <span style="font-family:var(--font-mono);"><span style="color:#22c55e;">●</span> ${escapeHtml(p.label || "LAN Peer")}</span>
                 <button type="button" class="btn-tool" style="padding:2px 8px;font-size:11px;" onclick="pullPeerUrl('${escapeHtml(p.url)}')">Sync</button>
               </div>`
             )
@@ -1933,7 +1955,7 @@ async function refreshSyncModal() {
         ? (d.peers || [])
             .map(
               (p) => `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid rgba(128,128,128,0.15);">
-                <span style="font-family:var(--font-mono);word-break:break-all;">${escapeHtml(p.label || "Peer")} · ${escapeHtml(p.url)}</span>
+                <span style="font-family:var(--font-mono);word-break:break-all;">${escapeHtml(p.label || "Peer")}</span>
                 <span style="display:flex;gap:6px;flex-shrink:0;">
                   <button type="button" class="btn-tool" style="padding:3px 8px;font-size:11px;" onclick="pullPeerUrl('${escapeHtml(p.url)}')">Sync</button>
                   <button type="button" class="btn-tool" style="padding:3px 8px;font-size:11px;" onclick="togglePeerSubscribe('${escapeHtml(p.url)}', ${!p.subscribed})">${p.subscribed ? "✓ Subscribed" : "+ Subscribe"}</button>
@@ -1948,6 +1970,21 @@ async function refreshSyncModal() {
     const m = await mr.json();
     const fp = m.followed_pubkeys || [];
     syncModerationList.innerHTML = `<div style="font-weight:600;margin-bottom:4px;">Followed Pubkeys (${fp.length})</div>`;
+  }
+}
+
+async function addCommunitySeed() {
+  const inp = document.getElementById("seed-node-url");
+  const url = (inp?.value || "").trim();
+  if (!url) return;
+  const r = await fetch("/api/seeds", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, label: "Community Seed" }),
+  });
+  if (r.ok && inp) {
+    inp.value = "";
+    await refreshSyncModal();
   }
 }
 
@@ -2110,7 +2147,7 @@ async function apiJson(url, opts = {}) {
 async function shareWebLink(domain) {
   try {
     const cfg = await apiJson("/api/config/public-gateway");
-    let gwUrl = (cfg.url || "http://127.0.0.1:8780").replace(/\/+$/, "");
+    let gwUrl = (cfg.url || window.location.origin).replace(/\/+$/, "");
     if (gwUrl.includes("127.0.0.1") || gwUrl.includes("localhost")) {
       const custom = prompt(
         "Your Public Gateway URL is currently local.\nEnter your public xnd-gateway URL (or keep localhost to preview):",
@@ -2288,9 +2325,9 @@ async function openCloudflareDashboard(
   }
 
   const [res, ghRes, linksRes] = await Promise.all([
-    fetch("/api/domains"),
-    fetch("/api/github/status").catch(() => null),
-    fetch("/api/github/links").catch(() => null),
+    fetch("/api/domains", { cache: "no-store" }),
+    fetch("/api/github/status", { cache: "no-store" }).catch(() => null),
+    fetch("/api/github/links", { cache: "no-store" }).catch(() => null),
   ]);
   const data = await res.json().catch(() => ({ domains: [] }));
   const ghStatus = ghRes && ghRes.ok ? await ghRes.json().catch(() => ({ connected: false })) : { connected: false };
@@ -2530,6 +2567,51 @@ async function openCloudflareDashboard(
         </form>
         <div id="cf-reg-keys-box" style="display:none;margin-top:16px;padding:14px;border:1px solid #86efac;border-radius:10px;background:rgba(16,185,129,0.08);"></div>
       </div>`;
+  } else if (activeSection === "hypertext") {
+    const targetDom = cleanDom || (ownedDomains[0]?.name || "");
+    const existingDoc = targetDom ? domains.find((d) => d.name === targetDom) : null;
+    const domainOpts = ownedDomains
+      .map((d) => `<option value="${escapeHtml(d.name)}" ${d.name === targetDom ? "selected" : ""}>${escapeHtml(d.name)}</option>`)
+      .join("");
+    mainHtml = `
+      <div class="cf-card">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+          <div>
+            <h2 style="margin:0;font-size:18px;">Instant Hypertext Update (News / Message / Post)</h2>
+            <p style="margin:4px 0 0;font-size:12px;color:var(--muted);">Type any message, news update, or transclusion hypertext (<code>{{xnd://...}}</code>) and publish to your <code>.xnd</code> domain in milliseconds — no website files or GitHub repo needed.</p>
+          </div>
+          ${targetDom ? `<button type="button" class="ver-btn" onclick="openDomain('${escapeHtml(targetDom)}')">View Current Page</button>` : ""}
+        </div>
+        <form id="cf-hypertext-form" class="cf-form-grid">
+          <label>
+            Target .xnd Domain
+            ${ownedDomains.length
+              ? `<div style="display:flex;gap:8px;flex-wrap:wrap;">
+                  <select id="cf-ht-domain-select" style="flex:1;min-width:180px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font-family:var(--font-mono);" onchange="document.getElementById('cf-ht-domain').value=this.value">
+                    ${domainOpts}
+                  </select>
+                  <input id="cf-ht-domain" type="text" value="${escapeHtml(targetDom)}" placeholder="mybrand.xnd" required style="flex:1;min-width:180px;" />
+                </div>`
+              : `<input id="cf-ht-domain" type="text" value="${escapeHtml(targetDom)}" placeholder="mybrand.xnd" required />`}
+          </label>
+          <label>
+            Headline / Title
+            <input id="cf-ht-title" type="text" value="${escapeHtml((existingDoc && existingDoc.title) || "")}" placeholder="Breaking Update, Status, or Post Title" />
+          </label>
+          <label>
+            Hypertext Message / News Content
+            <textarea id="cf-ht-content" rows="9" placeholder="Write news, announcements, notes, or link/quote any .xnd page with {{xnd://domain.xnd}}..." required></textarea>
+          </label>
+          <label>
+            Ed25519 Private Key (optional if already claimed on this node)
+            <input id="cf-ht-privkey" type="password" placeholder="Leave blank to sign with your unlocked node key" />
+          </label>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:6px;">
+            <span id="cf-ht-status" style="font-family:var(--font-mono);font-size:12px;color:var(--muted);"></span>
+            <button type="submit" class="btn-accent">Publish Hypertext Now</button>
+          </div>
+        </form>
+      </div>`;
   } else if (activeSection === "secrets") {
     const keySvg = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`;
     const rotateSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
@@ -2669,6 +2751,7 @@ async function openCloudflareDashboard(
             <div style="font-size:13px;color:var(--muted);margin-top:4px;">${escapeHtml(d.title || d.name)}</div>
           </div>
           <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap;">
+            ${d.owned_locally ? `<button class="ver-btn" onclick="openCloudflareDashboard('${escapeHtml(d.name)}', 'hypertext')">Post Hypertext</button>` : ""}
             <button class="ver-btn" onclick="openCloudflareDashboard('${escapeHtml(d.name)}', 'deploy', 'capsule')">Host / GitHub</button>
             <button class="ver-btn" onclick="openCloudflareDashboard('${escapeHtml(d.name)}', 'repo')">Repo</button>
             ${d.owned_locally ? `<button class="ver-btn" onclick="openCloudflareDashboard('${escapeHtml(d.name)}', 'secrets')">Secrets &amp; Keys</button>` : ""}
@@ -2762,6 +2845,7 @@ async function openCloudflareDashboard(
               <h1 style="margin:4px 0 0;font-size:24px;">Welcome to XND New Internet</h1>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <button class="ver-btn" style="background:rgba(255,255,255,0.16);color:#fff;border-color:rgba(255,255,255,0.32);" onclick="openCloudflareDashboard('${escapeHtml(cleanDom || ownedDomains[0]?.name || "")}', 'hypertext')">Post Hypertext</button>
               <button class="ver-btn" style="background:rgba(255,255,255,0.16);color:#fff;border-color:rgba(255,255,255,0.32);" onclick="openCloudflareDashboard('', 'claim')">Claim Website</button>
               <button class="ver-btn" style="background:#fff;color:#0f172a;border-color:#fff;font-weight:700;" onclick="openCloudflareDashboard('', 'register')">Register Domain</button>
             </div>
@@ -2789,6 +2873,7 @@ async function openCloudflareDashboard(
             <button class="cf-nav-btn ${activeSection === "claimed" ? "active" : ""}" onclick="openCloudflareDashboard('', 'claimed')">Claimed Websites <span>${ownedCount}</span></button>
             <button class="cf-nav-btn ${activeSection === "claim" ? "active" : ""}" onclick="openCloudflareDashboard('', 'claim')">Claim Your Website</button>
             <button class="cf-nav-btn ${activeSection === "register" ? "active" : ""}" onclick="openCloudflareDashboard('', 'register')">Register Domain</button>
+            <button class="cf-nav-btn ${activeSection === "hypertext" && !cleanDom ? "active" : ""}" onclick="openCloudflareDashboard('', 'hypertext')">Post Hypertext</button>
             <button class="cf-nav-btn ${activeSection === "deploy" && !cleanDom ? "active" : ""}" onclick="openCloudflareDashboard('', 'deploy', 'capsule')">Host / Push Site</button>
             <button class="cf-nav-btn ${activeSection === "secrets" && !cleanDom ? "active" : ""}" onclick="openCloudflareDashboard('${escapeHtml(ownedDomains[0]?.name || "")}', 'secrets')">Secrets &amp; Keys</button>
             ${
@@ -2796,6 +2881,7 @@ async function openCloudflareDashboard(
                 ? `
             <div class="cf-nav-section">${escapeHtml(cleanDom)}</div>
             <button class="cf-nav-btn ${activeSection === "repo" ? "active" : ""}" onclick="openCloudflareDashboard('${escapeHtml(cleanDom)}', 'repo')">Files &amp; Commits</button>
+            <button class="cf-nav-btn ${activeSection === "hypertext" ? "active" : ""}" onclick="openCloudflareDashboard('${escapeHtml(cleanDom)}', 'hypertext')">Post Hypertext</button>
             <button class="cf-nav-btn ${activeSection === "deploy" ? "active" : ""}" onclick="openCloudflareDashboard('${escapeHtml(cleanDom)}', 'deploy', '${escapeHtml(deployMode)}')">Push Update</button>
             <button class="cf-nav-btn ${activeSection === "secrets" ? "active" : ""}" onclick="openCloudflareDashboard('${escapeHtml(cleanDom)}', 'secrets')">Secrets &amp; Keys</button>
             <button class="cf-nav-btn" onclick="openDomain('${escapeHtml(cleanDom)}')">Launch Site ↗</button>`
@@ -2808,6 +2894,48 @@ async function openCloudflareDashboard(
         </div>
       </div>
     </div>`;
+
+  if (activeSection === "hypertext") {
+    document.getElementById("cf-hypertext-form")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const status = document.getElementById("cf-ht-status");
+      const dom = normalizeXndDomain(document.getElementById("cf-ht-domain")?.value || "", true);
+      const title = (document.getElementById("cf-ht-title")?.value || "").trim() || dom;
+      const content = document.getElementById("cf-ht-content")?.value || "";
+      const privkey_hex = (document.getElementById("cf-ht-privkey")?.value || "").trim();
+      if (!dom || !content.trim()) return;
+      if (!isValidXndDomain(dom)) {
+        if (status) {
+          status.style.color = "#ef4444";
+          status.textContent = "Invalid .xnd domain.";
+        }
+        return;
+      }
+      if (status) {
+        status.style.color = "var(--muted)";
+        status.textContent = "Signing & indexing hypertext...";
+      }
+      const t0 = performance.now();
+      const r = await fetch("/api/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain: dom, title, content, privkey_hex }),
+      });
+      const elapsed = Math.max(1, Math.round(performance.now() - t0));
+      const d = await r.json().catch(() => ({ detail: "Publish failed" }));
+      if (!r.ok) {
+        if (status) {
+          status.style.color = "#ef4444";
+          status.textContent = d.detail || "Publish failed";
+        }
+        return;
+      }
+      if (status) {
+        status.style.color = "#10b981";
+        status.innerHTML = `Published v${escapeHtml(String(d.version_num || d.version || 1))} to <strong>${escapeHtml(d.domain || dom)}</strong> in ${elapsed} ms · <a href="#" onclick="event.preventDefault();openDomain('${escapeHtml(d.domain || dom)}')">Open Live Page</a>`;
+      }
+    });
+  }
 
   if (activeSection === "claim") {
     document.getElementById("cf-claim-form")?.addEventListener("submit", async (e) => {
@@ -3202,6 +3330,16 @@ async function openCloudflareDashboard(
       };
       if (ghPollTimer) clearTimeout(ghPollTimer);
       ghPollTimer = setTimeout(pollOnce, intervalMs);
+      const onFocusRefresh = async () => {
+        if (!document.getElementById("cf-gh-device-box")) return;
+        const sr = await fetch("/api/github/status", { cache: "no-store" }).catch(() => null);
+        const sd = sr && sr.ok ? await sr.json().catch(() => null) : null;
+        if (sd && sd.connected) {
+          window.removeEventListener("focus", onFocusRefresh);
+          openCloudflareDashboard(selectedDomain, "deploy");
+        }
+      };
+      window.addEventListener("focus", onFocusRefresh);
     });
 
     document.getElementById("cf-gh-disconnect-btn")?.addEventListener("click", async () => {
@@ -3459,6 +3597,40 @@ function pushUpdateFromRepo(domain, title, mode) {
   cfDeployDraft.title = title || domain;
   openCloudflareDashboard(domain, "deploy", mode === "capsule" ? "capsule" : "document");
 }
+
+function startRealtimeSyncStream() {
+  if (typeof EventSource === "undefined") return;
+  let es = null;
+  let reconnectTimer = null;
+  const connect = () => {
+    try {
+      es = new EventSource("/api/events/stream");
+      es.addEventListener("domain_update", (ev) => {
+        try {
+          const data = JSON.parse(ev.data || "{}");
+          if (!data.domain || !currentDoc || currentDoc.domain !== data.domain) return;
+          const curVer = Number(currentDoc.version_num || currentDoc.version || 0);
+          if (Number(data.version || 0) <= curVer) return;
+          if (document.body.classList.contains("in-doc-view") || document.body.classList.contains("in-site-view")) {
+            openDomain(data.domain);
+          }
+        } catch (_) {}
+      });
+      es.onerror = () => {
+        try { es.close(); } catch (_) {}
+        if (!reconnectTimer) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, 4000);
+        }
+      };
+    } catch (_) {}
+  };
+  connect();
+}
+
+startRealtimeSyncStream();
 
 const openParam = new URLSearchParams(window.location.search).get("open");
 const initialRoute = decodeRouteHash(window.location.hash);

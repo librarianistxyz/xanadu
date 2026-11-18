@@ -387,12 +387,14 @@ public class LocalNodeServer {
                 sendBytes(out, 200, "image/svg+xml", readAsset("xnd-ui/logo.svg"));
             } else if (path.equals("/static/logo.png")) {
                 sendBytes(out, 200, "image/png", readAsset("xnd-ui/logo.png"));
+            } else if (path.equals("/static/mathematical.png")) {
+                sendBytes(out, 200, "image/png", readAsset("xnd-ui/mathematical.png"));
             } else if (path.equals("/static/style.css")) {
                 sendBytes(out, 200, "text/css; charset=utf-8", readAsset("xnd-ui/style.css"));
             } else if (path.startsWith("/static/founder/") && !path.contains("..")) {
                 String fname = path.substring("/static/founder/".length());
-                if (fname.equals("image1.jpg") || fname.equals("image2.png")) {
-                    sendBytes(out, 200, fname.endsWith(".png") ? "image/png" : "image/jpeg", readAsset("xnd-ui/founder/" + fname));
+                if (fname.equals("image2.png")) {
+                    sendBytes(out, 200, "image/png", readAsset("xnd-ui/founder/" + fname));
                 } else {
                     sendJson(out, 404, "{\"detail\":\"Not found\"}");
                 }
@@ -1326,7 +1328,8 @@ public class LocalNodeServer {
                 String subDir = req.optString("subdir", "").trim();
                 JSONObject res = publishLocalCapsule(dom, title, bundle.files, bundle.backendPy, privkeyHex);
                 if (vaultUnlocked) saveVault();
-                String commitSha = ghHosting.getLatestCommitSha(repoName, bundle.branch);
+                String commitSha = "";
+                try { commitSha = ghHosting.getLatestCommitSha(repoName, bundle.branch); } catch (Exception ignored) {}
                 ghHosting.saveLink(dom, repoName, bundle.branch, subDir, commitSha);
                 res.put("ok", true).put("repo", repoName).put("branch", bundle.branch).put("files_count", bundle.files.length()).put("auto_sync", true);
                 sendJson(out, 200, res.toString());
@@ -1612,6 +1615,70 @@ public class LocalNodeServer {
                 sendJson(out, 200, (natTunnel != null ? natTunnel.status() : new JSONObject().put("ok", false).put("stun_ok", false)).toString());
             } else if (path.equals("/api/sync/manifest")) {
                 sendJson(out, 200, exportManifest().toString());
+            } else if (path.equals("/api/config/public-gateway") && method.equals("GET")) {
+                String gwUrl = "http://127.0.0.1:" + port;
+                try {
+                    File gwFile = new File(dataDir, "public_gateway.json");
+                    if (gwFile.exists()) {
+                        try (FileInputStream fis = new FileInputStream(gwFile)) {
+                            String u = new JSONObject(new String(readAll(fis), StandardCharsets.UTF_8)).optString("url", "").trim().replaceAll("/+$", "");
+                            if (!u.isEmpty()) gwUrl = u;
+                        }
+                    }
+                } catch (Exception ignored) {}
+                sendJson(out, 200, new JSONObject().put("ok", true).put("url", gwUrl).toString());
+            } else if (path.equals("/api/config/public-gateway") && method.equals("POST")) {
+                JSONObject req = new JSONObject(bodyStr.isEmpty() ? "{}" : bodyStr);
+                String u = req.optString("url", "").trim().replaceAll("/+$", "");
+                if (!u.startsWith("http://") && !u.startsWith("https://")) {
+                    sendJson(out, 400, "{\"detail\":\"Public gateway URL must start with http:// or https://\"}");
+                } else {
+                    try (FileOutputStream fos = new FileOutputStream(new File(dataDir, "public_gateway.json"))) {
+                        fos.write(new JSONObject().put("url", u).toString(2).getBytes(StandardCharsets.UTF_8));
+                    }
+                    sendJson(out, 200, new JSONObject().put("ok", true).put("url", u).toString());
+                }
+            } else if (path.startsWith("/site/")) {
+                String rest = path.substring("/site/".length());
+                int slashIdx = rest.indexOf('/');
+                String rawDom = URLDecoder.decode(slashIdx >= 0 ? rest.substring(0, slashIdx) : rest, "UTF-8");
+                String assetRel = slashIdx >= 0 ? rest.substring(slashIdx + 1) : "index.html";
+                if (assetRel.isEmpty()) assetRel = "index.html";
+                String cleanDom = normalizeXndDomain(rawDom);
+                if (!docs.containsKey(cleanDom)) lookupDocNostr(cleanDom);
+                JSONObject doc = docs.get(cleanDom);
+                if (doc == null) {
+                    sendJson(out, 404, "{\"detail\":\"Domain not found\"}");
+                } else if ("capsule".equals(doc.optString("kind"))) {
+                    out.write(("HTTP/1.1 307 Temporary Redirect\r\nLocation: /xnd-app/" + URLEncoder.encode(cleanDom, "UTF-8") + "/" + assetRel + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                } else {
+                    String rawContent = doc.optString("raw_content", "");
+                    JSONArray segs = TransclusionEngine.buildSegments(rawContent, docs);
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < segs.length(); i++) {
+                        JSONObject seg = segs.optJSONObject(i);
+                        if (seg == null) continue;
+                        String st = seg.optString("type", "");
+                        if ("text".equals(st)) {
+                            sb.append(escapeHtmlSimple(seg.optString("text", "")));
+                        } else if ("transclusion".equals(st)) {
+                            sb.append("<blockquote style=\"margin:10px 0;padding:10px 14px;border-left:3px solid #2563eb;background:#f8fafc;border-radius:6px;\"><div style=\"font-size:11px;color:#64748b;margin-bottom:4px;\">xnd://")
+                                    .append(escapeHtmlSimple(seg.optString("target_domain", ""))).append("</div>")
+                                    .append(escapeHtmlSimple(seg.optString("quoted_text", ""))).append("</blockquote>");
+                        } else if ("broken_transclusion".equals(st)) {
+                            sb.append("<code>").append(escapeHtmlSimple(seg.optString("raw", ""))).append("</code>");
+                        }
+                    }
+                    String title = escapeHtmlSimple(doc.optString("title", cleanDom));
+                    int ver = doc.optInt("version_num", doc.optInt("version", 1));
+                    String page = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>"
+                            + title + " — xnd://" + escapeHtmlSimple(cleanDom) + "</title>"
+                            + "<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:48px auto;padding:0 20px;line-height:1.7;color:#0f172a;background:#fff;}"
+                            + ".meta{font-family:ui-monospace,monospace;font-size:12px;color:#64748b;margin-bottom:8px;}h1{margin:0 0 18px;font-size:28px;}article{white-space:pre-wrap;font-size:16px;}</style></head>"
+                            + "<body><div class='meta'>xnd://" + escapeHtmlSimple(cleanDom) + " · v" + ver + "</div><h1>" + title + "</h1><article>" + sb + "</article></body></html>";
+                    sendBytes(out, 200, "text/html; charset=utf-8", page.getBytes(StandardCharsets.UTF_8));
+                }
             } else if (path.equals("/api/gateway/status")) {
                 boolean hw = checkHasWan();
                 JSONObject gw = hw ? null : findLanGateway();
@@ -1655,6 +1722,60 @@ public class LocalNodeServer {
                         int acc = relayRawNostrEvent(evMsg);
                         sendJson(out, 200, new JSONObject().put("ok", acc > 0).put("accepted", acc).toString());
                     }
+                }
+            } else if (path.equals("/api/dht/find")) {
+                String clean = normalizeXndDomain(qp.getOrDefault("domain", ""));
+                if (clean.isEmpty()) {
+                    sendJson(out, 400, "{\"detail\":\"Missing domain\"}");
+                } else if (docs.containsKey(clean)) {
+                    sendJson(out, 200, new JSONObject().put("ok", true).put("found", true).put("domain", clean).put("bundle", exportDomainBundle(clean)).toString());
+                } else {
+                    List<String> cands = collectActivePeerUrls();
+                    cands.sort((a, b) -> dhtDistanceHex(a, clean).compareTo(dhtDistanceHex(b, clean)));
+                    JSONArray closest = new JSONArray();
+                    for (int i = 0; i < Math.min(6, cands.size()); i++) {
+                        closest.put(new JSONObject().put("url", cands.get(i)).put("label", "Peer"));
+                    }
+                    sendJson(out, 200, new JSONObject().put("ok", true).put("found", false).put("domain", clean).put("closest_peers", closest).toString());
+                }
+            } else if (path.startsWith("/api/consensus/")) {
+                String clean = normalizeXndDomain(URLDecoder.decode(path.substring("/api/consensus/".length()), "UTF-8"));
+                JSONObject doc = docs.get(clean);
+                String pub = doc != null ? doc.optString("pubkey_hex", doc.optString("pubkey", "")) : getPinnedPubkey(clean);
+                JSONObject pinRec = trustPins.get(clean);
+                String pinSrc = pinRec != null ? pinRec.optString("source", "") : (domainKeys.containsKey(clean) ? "self" : "first_seen");
+                JSONArray confArr = new JSONArray();
+                Map<String, String> cBucket = trustConflicts.get(clean);
+                if (cBucket != null) {
+                    for (Map.Entry<String, String> ce : cBucket.entrySet()) {
+                        confArr.put(new JSONObject().put("alias_domain", ce.getKey()).put("pubkey_hex", ce.getValue()));
+                    }
+                }
+                sendJson(out, 200, new JSONObject()
+                        .put("ok", true)
+                        .put("domain", clean)
+                        .put("pubkey_hex", pub)
+                        .put("canonical_domain", pub.isEmpty() ? clean : canonicalDomainFor(clean, pub))
+                        .put("pin_source", pinSrc)
+                        .put("created_at", doc != null ? doc.optDouble("created_at", 0.0) : 0.0)
+                        .put("policy", "earliest_claim_with_petname")
+                        .put("conflicts", confArr)
+                        .toString());
+            } else if (path.equals("/api/seeds") && method.equals("GET")) {
+                sendJson(out, 200, new JSONObject()
+                        .put("ok", true)
+                        .put("self_seed_active", shareGateway && checkHasWan())
+                        .put("seeds", loadSeeds())
+                        .toString());
+            } else if (path.equals("/api/seeds") && method.equals("POST")) {
+                JSONObject req = new JSONObject(bodyStr.isEmpty() ? "{}" : bodyStr);
+                String u = req.optString("url", "").trim().replaceAll("/+$", "");
+                String lbl = req.optString("label", "Community Seed").trim();
+                if (!u.startsWith("http://") && !u.startsWith("https://")) {
+                    sendJson(out, 400, "{\"detail\":\"Seed URL must start with http:// or https://\"}");
+                } else {
+                    rememberSeed(u, lbl);
+                    sendJson(out, 200, new JSONObject().put("ok", true).put("seeds", loadSeeds()).toString());
                 }
             } else if (path.equals("/api/p2p/wifidirect/status")) {
                 if (wifiDirectMesh != null) wifiDirectMesh.discoverPeers();
@@ -2186,12 +2307,36 @@ public class LocalNodeServer {
                 if (rawName.isEmpty()) continue;
                 pubMap.put(rawName, inPub);
                 String pinnedPub = getPinnedPubkey(rawName);
+                JSONObject pinRec = trustPins.get(rawName);
+                String pinSource = pinRec != null ? pinRec.optString("source", "") : "";
                 JSONObject existing = docs.get(rawName);
                 String existingPub = !pinnedPub.isEmpty() ? pinnedPub : (existing != null ? existing.optString("pubkey_hex", existing.optString("pubkey", "")).trim().toLowerCase(Locale.US) : "");
+                double inTs = dm.optDouble("created_at", 0.0);
+                double exTs = existing != null ? existing.optDouble("created_at", 0.0) : 0.0;
+                boolean locallyOwned = domainKeys.containsKey(rawName) && !domainKeys.get(rawName).optString("privkey_hex", "").isEmpty();
                 if (!existingPub.isEmpty() && !inPub.isEmpty() && !existingPub.equals(inPub)) {
-                    String alias = canonicalDomainFor(rawName, inPub);
-                    aliasMap.put(rawName, alias);
-                    recordTrustConflict(rawName, alias, inPub);
+                    if (!locallyOwned && !"manual".equals(pinSource) && inTs > 0 && exTs > 0 && (inTs + 60.0) < exTs) {
+                        String displacedAlias = canonicalDomainFor(rawName, existingPub);
+                        if (existing != null && !docs.containsKey(displacedAlias)) {
+                            try {
+                                JSONObject moved = new JSONObject(existing.toString());
+                                moved.put("domain", displacedAlias);
+                                docs.put(displacedAlias, moved);
+                                saveDocs();
+                            } catch (Exception ignored) {}
+                        }
+                        recordTrustConflict(rawName, displacedAlias, existingPub);
+                        docs.remove(rawName);
+                        try {
+                            trustPins.put(rawName, new JSONObject().put("pubkey_hex", inPub).put("pinned_at", System.currentTimeMillis() / 1000.0).put("source", "consensus_earliest"));
+                            saveTrustPins();
+                        } catch (Exception ignored) {}
+                        aliasMap.put(rawName, rawName);
+                    } else {
+                        String alias = canonicalDomainFor(rawName, inPub);
+                        aliasMap.put(rawName, alias);
+                        recordTrustConflict(rawName, alias, inPub);
+                    }
                 } else {
                     if (!inPub.isEmpty()) ensureFirstSeenPin(rawName, inPub, "first_seen");
                     aliasMap.put(rawName, rawName);
@@ -2251,7 +2396,7 @@ public class LocalNodeServer {
                     rejected++;
                     continue;
                 }
-                if (existing != null && exVer >= ver && sha.equals(existing.optString("sha256", ""))) {
+                if (existing != null && (exVer > ver || (exVer == ver && sha.equals(existing.optString("sha256", ""))))) {
                     continue;
                 }
                 JSONObject d = new JSONObject();
@@ -2536,7 +2681,20 @@ public class LocalNodeServer {
                         lanPeers.put(peerUrl, rec);
                         if (shouldSync) {
                             pool.submit(() -> {
-                                try { syncOneLanPeer(peerUrl, pLabel); } catch (Exception ignored) {}
+                                try {
+                                    if (!checkHasWan() && meshGatewayPeer == null) {
+                                        try {
+                                            JSONObject m = new JSONObject(peerGet(peerUrl, "/api/sync/manifest", 2000));
+                                            if (m.optBoolean("has_wan", false) && m.optBoolean("share_gateway", true)) {
+                                                meshGatewayPeer = new JSONObject()
+                                                        .put("url", peerUrl)
+                                                        .put("label", m.optString("label", pLabel))
+                                                        .put("updated_at", System.currentTimeMillis() / 1000.0);
+                                            }
+                                        } catch (Exception ignored) {}
+                                    }
+                                    syncOneLanPeer(peerUrl, pLabel);
+                                } catch (Exception ignored) {}
                             });
                         }
                     } catch (Exception ignored) {
@@ -2683,9 +2841,14 @@ public class LocalNodeServer {
         return new int[]{addedPeers, importedDocs};
     }
 
+    private final Map<String, Long> negLookupCache = new java.util.concurrent.ConcurrentHashMap<>();
+
     private boolean lookupDocNostr(String targetDomain) {
         String clean = targetDomain == null ? "" : targetDomain.trim().toLowerCase(Locale.US);
         if (clean.isEmpty() || blockedDomains.contains(clean)) return false;
+        Long negTs = negLookupCache.get(clean);
+        if (negTs != null && (System.currentTimeMillis() - negTs) < 30_000L) return false;
+        if (checkHasWan()) {
         String[] relays = {"wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"};
         JSONArray domains = new JSONArray();
         JSONArray versions = new JSONArray();
@@ -2824,11 +2987,43 @@ public class LocalNodeServer {
             }
         } catch (Exception ignored) {
         }
+        }
+        if (!docs.containsKey(clean)) {
+            List<String> frontier = new ArrayList<>(collectActivePeerUrls());
+            JSONArray seeds = loadSeeds();
+            for (int si = 0; si < seeds.length(); si++) {
+                String su = seeds.optJSONObject(si) != null ? seeds.optJSONObject(si).optString("url", "") : "";
+                if (!su.isEmpty() && !frontier.contains(su)) frontier.add(su);
+            }
+            int limit = Math.min(4, frontier.size());
+            if (limit > 0) {
+                java.util.List<java.util.concurrent.Future<?>> futs = new ArrayList<>();
+                for (int i = 0; i < limit; i++) {
+                    final String base = frontier.get(i);
+                    futs.add(pool.submit(() -> {
+                        try {
+                            String raw = peerGet(base, "/api/dht/find?domain=" + URLEncoder.encode(clean, "UTF-8"), 1200);
+                            JSONObject dj = new JSONObject(raw);
+                            if (dj.optBoolean("found", false) && dj.has("bundle")) {
+                                importBundle(dj.getJSONObject("bundle"), true);
+                            }
+                        } catch (Exception ignored) {}
+                    }));
+                }
+                long waitEnd = System.currentTimeMillis() + 1500L;
+                for (java.util.concurrent.Future<?> f : futs) {
+                    try {
+                        long rem = Math.max(50L, waitEnd - System.currentTimeMillis());
+                        f.get(rem, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
         if (!docs.containsKey(clean) && !checkHasWan()) {
             JSONObject gw = findLanGateway();
             if (gw != null) {
                 try {
-                    String raw = httpGet(gw.optString("url") + "/api/gateway/lookup?domain=" + URLEncoder.encode(clean, "UTF-8"), 3500);
+                    String raw = httpGet(gw.optString("url") + "/api/gateway/lookup?domain=" + URLEncoder.encode(clean, "UTF-8"), 2500);
                     if (raw != null && !raw.isEmpty()) {
                         importBundle(new JSONObject(raw), true);
                     }
@@ -2836,7 +3031,64 @@ public class LocalNodeServer {
                 }
             }
         }
-        return docs.containsKey(clean);
+        boolean found = docs.containsKey(clean);
+        if (!found) negLookupCache.put(clean, System.currentTimeMillis());
+        return found;
+    }
+
+    private String dhtDistanceHex(String nodeId, String key) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] a = md.digest((nodeId != null ? nodeId : "").getBytes(StandardCharsets.UTF_8));
+            md.reset();
+            byte[] b = md.digest((key != null ? key.trim().toLowerCase(Locale.US) : "").getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(64);
+            for (int i = 0; i < 32; i++) {
+                sb.append(String.format(Locale.US, "%02x", (a[i] ^ b[i]) & 0xFF));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private JSONArray loadSeeds() {
+        try {
+            File f = new File(dataDir, "seeds.json");
+            if (f.exists()) {
+                try (FileInputStream fis = new FileInputStream(f)) {
+                    return new JSONArray(new String(readAll(fis), StandardCharsets.UTF_8));
+                }
+            }
+        } catch (Exception ignored) {}
+        return new JSONArray();
+    }
+
+    private void rememberSeed(String url, String label) {
+        try {
+            String clean = url != null ? url.trim().replaceAll("/+$", "") : "";
+            if (!clean.startsWith("http://") && !clean.startsWith("https://")) return;
+            JSONArray cur = loadSeeds();
+            JSONArray next = new JSONArray();
+            boolean updated = false;
+            long nowSec = System.currentTimeMillis() / 1000L;
+            for (int i = 0; i < cur.length(); i++) {
+                JSONObject o = cur.optJSONObject(i);
+                if (o == null) continue;
+                if (clean.equals(o.optString("url", ""))) {
+                    o.put("last_seen", nowSec);
+                    if (label != null && !label.isEmpty()) o.put("label", label);
+                    updated = true;
+                }
+                next.put(o);
+            }
+            if (!updated) {
+                next.put(new JSONObject().put("url", clean).put("label", label != null && !label.isEmpty() ? label : "Community Seed").put("last_seen", nowSec));
+            }
+            try (FileOutputStream fos = new FileOutputStream(new File(dataDir, "seeds.json"))) {
+                fos.write(next.toString(2).getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception ignored) {}
     }
 
     private static final long MAX_MESH_QUOTA_BYTES = 100L * 1024L * 1024L;
@@ -3026,6 +3278,8 @@ public class LocalNodeServer {
                     .put("label", "Xanadu Android")
                     .put("has_wan", checkHasWan())
                     .put("share_gateway", shareGateway)
+                    .put("seed_node", shareGateway && checkHasWan())
+                    .put("dht_k", 3)
                     .put("domains", domMap)
                     .put("mesh_bytes", computeMeshBytes())
                     .put("mesh_quota_bytes", MAX_MESH_QUOTA_BYTES);
@@ -3081,15 +3335,17 @@ public class LocalNodeServer {
     private List<String> collectActivePeerUrls() {
         List<String> urls = new ArrayList<>();
         Set<String> seen = new HashSet<>();
-        for (JSONObject p : new ArrayList<>(peers)) {
-            String u = p.optString("url", "").trim().replaceAll("/+$", "");
+        List<JSONObject> sortedLan = new ArrayList<>(lanPeers.values());
+        sortedLan.sort((a, b) -> Long.compare(b.optLong("last_seen_ms", 0L), a.optLong("last_seen_ms", 0L)));
+        for (JSONObject lp : sortedLan) {
+            String u = lp.optString("url", "").trim().replaceAll("/+$", "");
             if ((u.startsWith("http://") || u.startsWith("https://"))
                     && !u.contains("127.0.0.1") && !u.contains("localhost") && seen.add(u)) {
                 urls.add(u);
             }
         }
-        for (JSONObject lp : lanPeers.values()) {
-            String u = lp.optString("url", "").trim().replaceAll("/+$", "");
+        for (JSONObject p : new ArrayList<>(peers)) {
+            String u = p.optString("url", "").trim().replaceAll("/+$", "");
             if ((u.startsWith("http://") || u.startsWith("https://"))
                     && !u.contains("127.0.0.1") && !u.contains("localhost") && seen.add(u)) {
                 urls.add(u);
@@ -3548,9 +3804,10 @@ public class LocalNodeServer {
         }
         long now = System.currentTimeMillis();
         JSONObject cur = meshGatewayPeer;
-        if (cur != null && (now / 1000.0 - cur.optDouble("updated_at", 0.0)) < 300.0) {
+        if (cur != null && (now / 1000.0 - cur.optDouble("updated_at", 0.0)) < 90.0) {
             return cur;
         }
+        meshGatewayPeer = null;
         for (String pUrl : collectActivePeerUrls()) {
             try {
                 String raw = peerGet(pUrl, "/api/sync/manifest", 1500);
@@ -3824,7 +4081,7 @@ public class LocalNodeServer {
             JSONObject gw = findLanGateway();
             if (gw != null) {
                 try {
-                    String raw = httpGet(gw.optString("url") + "/api/news?category=" + URLEncoder.encode(cat, "UTF-8"), 7500);
+                    String raw = httpGet(gw.optString("url") + "/api/news?category=" + URLEncoder.encode(cat, "UTF-8"), 12000);
                     JSONObject gd = new JSONObject(raw);
                     if (gd.has("stories") && gd.optJSONArray("stories") != null && gd.optJSONArray("stories").length() > 0) {
                         gd.put("_ts", nowMs);
@@ -4376,19 +4633,22 @@ public class LocalNodeServer {
                         || ql.contains("who founded") || ql.contains("author")
                         || ql.contains("xanadu browser") || ql.contains("about xanadu") || ql.contains("what is xanadu");
                 if (fFounder) {
-                    String[] fFiles = new String[]{"image1.jpg", "image2.png"};
+                    String[] fFiles = new String[]{"image2.png"};
                     for (int fi = 0; fi < fFiles.length; fi++) {
                         fastImgs.put(new JSONObject().put("title", "Justin Ndambiri — Founder & Owner of Xanadu (.xnd) #" + (fi + 1))
                                 .put("image", "/static/founder/" + fFiles[fi])
                                 .put("source", "founder.xnd"));
                     }
                     if (knowledgeCard != null && !knowledgeCard.has("image")) {
-                        knowledgeCard.put("image", "/static/founder/image1.jpg");
+                        knowledgeCard.put("image", "/static/founder/image2.png");
                     }
                 }
                 if (ql.contains("xanadu") || ql.contains("xnd")) {
                     fastImgs.put(new JSONObject().put("title", "Xanadu (.xnd) Official Logo")
                             .put("image", "/static/logo.png")
+                            .put("source", "xanadu.xnd"));
+                    fastImgs.put(new JSONObject().put("title", "Xanadu (.xnd) Mathematical Logo")
+                            .put("image", "/static/mathematical.png")
                             .put("source", "xanadu.xnd"));
                     if (knowledgeCard != null && !knowledgeCard.has("image")) {
                         knowledgeCard.put("image", "/static/logo.png");
@@ -4426,19 +4686,22 @@ public class LocalNodeServer {
                     || ql.contains("who founded") || ql.contains("author")
                     || ql.contains("xanadu browser") || ql.contains("about xanadu") || ql.contains("what is xanadu");
             if (isFounderQ) {
-                String[] fFiles = new String[]{"image1.jpg", "image2.png"};
+                String[] fFiles = new String[]{"image2.png"};
                 for (int fi = 0; fi < fFiles.length; fi++) {
                     imgs.put(new JSONObject().put("title", "Justin Ndambiri — Founder & Owner of Xanadu (.xnd) #" + (fi + 1))
                             .put("image", "/static/founder/" + fFiles[fi])
                             .put("source", "founder.xnd"));
                 }
                 if (knowledgeCard != null && !knowledgeCard.has("image")) {
-                    knowledgeCard.put("image", "/static/founder/image1.jpg");
+                    knowledgeCard.put("image", "/static/founder/image2.png");
                 }
             }
             if (ql.contains("xanadu") || ql.contains("xnd")) {
                 imgs.put(new JSONObject().put("title", "Xanadu (.xnd) Official Logo")
                         .put("image", "/static/logo.png")
+                        .put("source", "xanadu.xnd"));
+                imgs.put(new JSONObject().put("title", "Xanadu (.xnd) Mathematical Logo")
+                        .put("image", "/static/mathematical.png")
                         .put("source", "xanadu.xnd"));
                 if (knowledgeCard != null && !knowledgeCard.has("image")) {
                     knowledgeCard.put("image", "/static/logo.png");
@@ -4548,11 +4811,17 @@ public class LocalNodeServer {
                 JSONObject gw = findLanGateway();
                 if (gw != null) {
                     try {
-                        String raw = httpGet(gw.optString("url") + "/api/gateway/search?q=" + URLEncoder.encode(query, "UTF-8") + "&scope=" + URLEncoder.encode(scope, "UTF-8"), 7500);
+                        String raw = httpGet(gw.optString("url") + "/api/gateway/search?q=" + URLEncoder.encode(query, "UTF-8") + "&scope=" + URLEncoder.encode(scope, "UTF-8"), 16000);
                         JSONObject gd = new JSONObject(raw);
                         if (knowledgeCard == null && gd.has("knowledge_card") && !gd.isNull("knowledge_card")) {
                             knowledgeCard = gd.optJSONObject("knowledge_card");
                             out.put("knowledge_card", knowledgeCard);
+                        }
+                        if (gd.has("deep_passages") && !out.has("deep_passages")) {
+                            out.put("deep_passages", gd.optJSONArray("deep_passages"));
+                        }
+                        if (gd.has("alternatives") && !out.has("alternatives")) {
+                            out.put("alternatives", gd.optJSONArray("alternatives"));
                         }
                         if (gd.has("disambiguation")) {
                             JSONArray gDis = gd.optJSONArray("disambiguation");
@@ -5152,6 +5421,11 @@ public class LocalNodeServer {
             } catch (Exception ignored) {}
         }
         return new String[]{nPub, nPriv};
+    }
+
+    private static String escapeHtmlSimple(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;");
     }
 
     private static HttpURLConnection openBoundConnection(URL url) throws Exception {

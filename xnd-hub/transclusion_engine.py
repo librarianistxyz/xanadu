@@ -6,9 +6,9 @@ import hashlib
 import re
 from typing import Any, Callable
 
-# Supports both legacy {{xnd://domain@v1:0-10}} and cryptographic {{xnd://domain@v1#a1b2c3d4e5f6:0-10}}
+# Supports short {{xnd://domain.xnd}}, versioned {{xnd://domain@v1:0-10}}, and cryptographic {{xnd://domain@v1#a1b2c3d4e5f6:0-10}}
 TRANSCLUSION_RE = re.compile(
-    r"\{\{xnd://([a-z0-9.-]+\.xnd)(?:@v(\d+))?(?:#([0-9a-fA-F]{6,64}))?:(\d+)-(\d+)\}\}",
+    r"\{\{\s*xnd://([a-z0-9.-]+\.xnd)(?:@v(\d+))?(?:#([0-9a-fA-F]{6,64}))?(?::(\d+)-(\d+))?\s*\}\}",
     re.IGNORECASE,
 )
 
@@ -45,8 +45,8 @@ def extract_transclusion_links(
                 "hash_verified": bool(target_v and (not expected_hash or actual_hash.startswith(expected_hash))),
                 "source_start": m.start(),
                 "source_end": m.end(),
-                "target_start": int(m.group(4)),
-                "target_end": int(m.group(5)),
+                "target_start": int(m.group(4)) if m.group(4) is not None else 0,
+                "target_end": int(m.group(5)) if m.group(5) is not None else 0,
                 "link_type": "transclusion",
             }
         )
@@ -69,8 +69,10 @@ def build_segments(
         target_v = get_version_fn(t_domain, t_ver)
         t_text = get_blob_fn(target_v["sha256"]) if target_v else None
         if target_v is not None and t_text is not None:
-            s = max(0, min(int(m.group(4)), len(t_text)))
-            e = max(s, min(int(m.group(5)), len(t_text)))
+            raw_s = int(m.group(4)) if m.group(4) is not None else 0
+            raw_e = int(m.group(5)) if m.group(5) is not None else len(t_text)
+            s = max(0, min(raw_s, len(t_text)))
+            e = max(s, min(raw_e, len(t_text)))
             actual_hash = (target_v.get("sha256") or "").lower()
             hash_verified = (not expected_hash) or actual_hash.startswith(expected_hash)
             quoted = t_text[s:e]

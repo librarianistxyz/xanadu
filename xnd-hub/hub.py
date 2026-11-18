@@ -43,7 +43,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -65,6 +65,7 @@ from p2p_discovery import (
     discover_peers_nostr,
     lookup_doc_nostr,
     start_lan_discovery,
+    subscribe_docs_nostr,
 )
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -75,7 +76,7 @@ UI_DIR = Path(os.environ.get("XND_UI_DIR", str(ROOT_DIR / "xnd-ui")))
 RUST_CORE_BIN = ROOT_DIR / "xnd-core" / "target" / "release" / "xnd-core"
 
 TRANSCLUSION_RE = re.compile(
-    r"\{\{xnd://((?:[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,62}\.)+xnd)(?:@v(\d+))?:(\d+)-(\d+)\}\}"
+    r"\{\{\s*xnd://((?:[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,62}\.)+xnd)(?:@v(\d+))?(?:#([0-9a-fA-F]{6,64}))?(?::(\d+)-(\d+))?\s*\}\}"
 )
 DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,62}\.)+xnd$")
 
@@ -217,6 +218,11 @@ class TrustStore:
         with self._lock:
             rec = self.pins.get(domain.strip().lower())
             return str(rec.get("pubkey_hex", "")) if isinstance(rec, dict) else ""
+
+    def get_pin_source(self, domain: str) -> str:
+        with self._lock:
+            rec = self.pins.get(domain.strip().lower())
+            return str(rec.get("source", "")) if isinstance(rec, dict) else ""
 
     def ensure_first_seen(self, domain: str, pubkey_hex: str, source: str = "first_seen") -> str:
         dom = domain.strip().lower()
@@ -590,10 +596,65 @@ def _is_safe_public_url(url: str) -> bool:
         return False
 
 
+def _dht_distance(node_id: str, key: str) -> int:
+    a = hashlib.sha256((node_id or "").encode("utf-8")).digest()
+    b = hashlib.sha256((key or "").strip().lower().encode("utf-8")).digest()
+    return int.from_bytes(bytes(x ^ y for x, y in zip(a, b)), "big")
+
+
+def _seeds_path() -> Path:
+    return DATA_DIR / "state" / "seeds.json"
+
+
+def _load_seeds() -> list[dict[str, Any]]:
+    try:
+        p = _seeds_path()
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [x for x in data if isinstance(x, dict) and str(x.get("url", "")).startswith(("http://", "https://"))]
+    except Exception:
+        pass
+    return []
+
+
+def _save_seeds(seeds: list[dict[str, Any]]) -> None:
+    try:
+        p = _seeds_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(seeds[:32], indent=2), encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _remember_seed(url: str, label: str = "Community Seed") -> None:
+    clean = (url or "").strip().rstrip("/")
+    if not clean.startswith(("http://", "https://")) or clean in _self_urls():
+        return
+    seeds = _load_seeds()
+    for s in seeds:
+        if s.get("url") == clean:
+            s["last_seen"] = time.time()
+            if label:
+                s["label"] = label
+            _save_seeds(seeds)
+            return
+    seeds.append({"url": clean, "label": label or "Community Seed", "last_seen": time.time()})
+    _save_seeds(seeds)
+
+
+_NEG_RESOLVE_CACHE: dict[str, float] = {}
+
+
 def _try_resolve_from_nostr(domain: str) -> bool:
-    """Query Nostr relays, LAN gateway, and known peers on-demand for a specific .xnd domain."""
+    """Query Nostr relays, DHT peers, seed nodes, and LAN gateway on-demand for a specific .xnd domain."""
     clean = domain.strip().lower()
     if not clean or clean in store.blocked_domains:
+        return False
+    now_ts = time.time()
+    if now_ts - float(_NEG_RESOLVE_CACHE.get(clean, 0.0)) < 30.0:
         return False
     parsed = _parse_canonical_domain(clean)
     lookup_targets = [clean] + ([parsed[0]] if parsed and parsed[0] not in store.blocked_domains else [])
@@ -608,21 +669,22 @@ def _try_resolve_from_nostr(domain: str) -> bool:
                 return True
         return False
 
-    for target in lookup_targets:
-        try:
-            bundle = lookup_doc_nostr(target)
-            if bundle.get("versions"):
-                import_sync_bundle(bundle, ignore_follow_filter=True)
-                if _has_resolved():
-                    return True
-        except Exception:
-            pass
+    if _check_has_wan():
+        for target in lookup_targets:
+            try:
+                bundle = lookup_doc_nostr(target)
+                if bundle.get("versions"):
+                    import_sync_bundle(bundle, ignore_follow_filter=True)
+                    if _has_resolved():
+                        return True
+            except Exception:
+                pass
     gw = _find_lan_gateway()
     if gw:
         for target in lookup_targets:
             try:
                 q_dom = urllib.parse.quote(target)
-                with httpx.Client(timeout=3.5) as hc:
+                with httpx.Client(timeout=2.5) as hc:
                     r = hc.get(f"{gw['url']}/api/gateway/lookup?domain={q_dom}")
                     if r.status_code == 200:
                         import_sync_bundle(r.json(), ignore_follow_filter=True)
@@ -630,19 +692,47 @@ def _try_resolve_from_nostr(domain: str) -> bool:
                             return True
             except Exception:
                 pass
-    peer_urls = [u for u in list(_LAN_PEERS.keys())] + [
-        p.get("url", "") for p in list(store.peers.values()) if p.get("url")
-    ]
-    for base in dict.fromkeys(u.rstrip("/") for u in peer_urls if u):
-        try:
-            with httpx.Client(timeout=1.5) as hc:
-                r = hc.get(f"{base}/api/sync")
-                if r.status_code == 200:
-                    import_sync_bundle(r.json(), ignore_follow_filter=True)
-                    if _has_resolved():
-                        return True
-        except Exception:
-            pass
+    peer_urls = (
+        [u for u in list(_LAN_PEERS.keys())]
+        + [s.get("url", "") for s in _load_seeds()]
+        + [p.get("url", "") for p in list(store.peers.values()) if p.get("url")]
+    )
+    self_set = _self_urls()
+    frontier = [u.rstrip("/") for u in dict.fromkeys(peer_urls) if u and u.rstrip("/") not in self_set][:6]
+    if frontier:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _dht_probe(base: str) -> list[str]:
+            extra: list[str] = []
+            for target in lookup_targets:
+                try:
+                    q_dom = urllib.parse.quote(target)
+                    with httpx.Client(timeout=1.2) as hc:
+                        r = hc.get(f"{base}/api/dht/find?domain={q_dom}")
+                        if r.status_code == 200:
+                            dj = r.json()
+                            if dj.get("found") and isinstance(dj.get("bundle"), dict):
+                                import_sync_bundle(dj["bundle"], ignore_follow_filter=True)
+                            for cp in dj.get("closest_peers") or []:
+                                cu = str(cp.get("url", "")).rstrip("/")
+                                if cu and cu not in self_set:
+                                    extra.append(cu)
+                except Exception:
+                    pass
+            return extra
+
+        with ThreadPoolExecutor(max_workers=min(6, len(frontier))) as pool:
+            next_hop: list[str] = []
+            for extra in pool.map(_dht_probe, frontier):
+                next_hop.extend(extra)
+            if _has_resolved():
+                return True
+            hop2 = [u for u in dict.fromkeys(next_hop) if u not in frontier][:4]
+            if hop2:
+                list(pool.map(_dht_probe, hop2))
+                if _has_resolved():
+                    return True
+    _NEG_RESOLVE_CACHE[clean] = time.time()
     return False
 
 
@@ -746,6 +836,7 @@ def publish_document(
 
     if pinned:
         threading.Thread(target=push_domain_to_quorum, args=(domain, 3), daemon=True).start()
+    _notify_domain_updated(domain, next_ver)
 
     return {"domain": domain, "version": next_ver, "sha256": sha256, "pubkey": pub_hex, "signature": sig_hex, "kind": "document"}
 
@@ -823,6 +914,7 @@ def publish_capsule(
         store.save_capsule_state(domain, initial_state)
 
     threading.Thread(target=push_domain_to_quorum, args=(domain, 3), daemon=True).start()
+    _notify_domain_updated(domain, next_ver)
 
     return {"domain": domain, "version": next_ver, "sha256": sha256, "pubkey": pub_hex, "signature": sig_hex, "kind": "capsule"}
 
@@ -1912,10 +2004,64 @@ def nat_status() -> dict[str, Any]:
     return nat_tunnel.status()
 
 
+_LIVE_LOCK = threading.Lock()
+_LIVE_SUBSCRIBERS: set[asyncio.Queue[dict[str, Any]]] = set()
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _notify_domain_updated(domain: str, version_num: int) -> None:
+    """Push a real-time domain update event to all connected SSE UI clients."""
+    payload = {"domain": domain, "version": int(version_num), "ts": time.time()}
+    with _LIVE_LOCK:
+        subs = list(_LIVE_SUBSCRIBERS)
+        loop = _MAIN_LOOP
+    if not subs or loop is None or loop.is_closed():
+        return
+    for q in subs:
+        try:
+            loop.call_soon_threadsafe(q.put_nowait, payload)
+        except Exception:
+            pass
+
+
+def _on_realtime_nostr_bundle(bundle: dict[str, Any]) -> None:
+    try:
+        import_sync_bundle(bundle, ignore_follow_filter=True)
+    except Exception:
+        pass
+
+
+@app.get("/api/events/stream")
+async def api_events_stream(request: Request) -> StreamingResponse:
+    _require_localhost(request)
+    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
+    with _LIVE_LOCK:
+        _LIVE_SUBSCRIBERS.add(q)
+
+    async def _gen():
+        try:
+            yield ": connected\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=25.0)
+                    yield f"event: domain_update\ndata: {json.dumps(ev)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            with _LIVE_LOCK:
+                _LIVE_SUBSCRIBERS.discard(q)
+
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.on_event("startup")
 async def startup() -> None:
-    global nat_tunnel
+    global nat_tunnel, _MAIN_LOOP
+    _MAIN_LOOP = asyncio.get_running_loop()
     seed_universe()
+    _purge_collision_aliases()
     _ensure_builtin_docs()
     seed_bootstrap_peers()
     if nat_tunnel is None:
@@ -1923,6 +2069,7 @@ async def startup() -> None:
         nat_tunnel.start()
     asyncio.create_task(asyncio.to_thread(store.crawl_all_domains))
     start_lan_discovery(int(os.environ.get("XND_PORT", "8765")), _on_lan_peer_found, "Xanadu Desktop")
+    subscribe_docs_nostr(_on_realtime_nostr_bundle)
     asyncio.create_task(_auto_gossip_loop())
     asyncio.create_task(_github_autosync_loop())
 
@@ -2252,7 +2399,41 @@ def _get_public_gateway_url() -> str:
                 return u
     except Exception:
         pass
-    return os.environ.get("XND_PUBLIC_GATEWAY_URL", "http://127.0.0.1:8780").strip().rstrip("/")
+    default_gw = f"http://127.0.0.1:{os.environ.get('XND_PORT', '8765')}"
+    return os.environ.get("XND_PUBLIC_GATEWAY_URL", default_gw).strip().rstrip("/")
+
+
+@app.get("/site/{domain}")
+@app.get("/site/{domain}/{asset_path:path}")
+def serve_public_site_share(domain: str, request: Request, asset_path: str = "index.html") -> Response:
+    doc = resolve_domain(domain, version=None)
+    clean_dom = doc["domain"]
+    if doc.get("kind") == "capsule":
+        rel = (asset_path or "index.html").lstrip("/") or "index.html"
+        return RedirectResponse(url=f"/xnd-app/{urllib.parse.quote(clean_dom)}/{rel}", status_code=307)
+    segs = doc.get("segments") or []
+    parts: list[str] = []
+    for seg in segs:
+        if seg.get("type") == "text":
+            parts.append(html.escape(seg.get("text", "")))
+        elif seg.get("type") == "transclusion":
+            q_txt = html.escape(seg.get("quoted_text", ""))
+            t_dom = html.escape(seg.get("target_domain", ""))
+            parts.append(f'<blockquote style="margin:10px 0;padding:10px 14px;border-left:3px solid #2563eb;background:#f8fafc;border-radius:6px;"><div style="font-size:11px;color:#64748b;margin-bottom:4px;">xnd://{t_dom}</div>{q_txt}</blockquote>')
+        elif seg.get("type") == "broken_transclusion":
+            parts.append(f'<code>{html.escape(seg.get("raw", ""))}</code>')
+    body_html = "".join(parts) if parts else html.escape(doc.get("raw_content", ""))
+    title = html.escape(str(doc.get("title") or clean_dom))
+    page = (
+        f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{title} — xnd://{html.escape(clean_dom)}</title>"
+        "<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:48px auto;padding:0 20px;line-height:1.7;color:#0f172a;background:#fff;}"
+        ".meta{font-family:ui-monospace,monospace;font-size:12px;color:#64748b;margin-bottom:8px;}"
+        "h1{margin:0 0 18px;font-size:28px;}article{white-space:pre-wrap;font-size:16px;}</style></head>"
+        f"<body><div class='meta'>xnd://{html.escape(clean_dom)} · v{int(doc.get('version', 1))}</div>"
+        f"<h1>{title}</h1><article>{body_html}</article></body></html>"
+    )
+    return HTMLResponse(content=page)
 
 
 @app.get("/api/config/public-gateway")
@@ -3771,7 +3952,7 @@ def _apply_seeded_images(query: str, images: list[dict[str, Any]], knowledge_car
                 if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
             )
             if founder_dir.exists()
-            else ["image1.jpg", "image2.png"]
+            else ["image2.png"]
         )
         founder_imgs = [
             {"title": f"Justin Ndambiri — Founder & Owner of Xanadu (.xnd) #{i + 1}", "image": f"/static/founder/{fname}", "source": "founder.xnd"}
@@ -3783,7 +3964,10 @@ def _apply_seeded_images(query: str, images: list[dict[str, Any]], knowledge_car
             knowledge_card["image"] = founder_imgs[0]["image"]
     if "xanadu" in ql_img or "xnd" in ql_img:
         xnd_logo_img = {"title": "Xanadu (.xnd) Official Logo", "image": "/static/logo.png", "source": "xanadu.xnd"}
-        out = ([xnd_logo_img] if not is_founder_q else []) + [im for im in out if im.get("image") != "/static/logo.png"] + ([xnd_logo_img] if is_founder_q else [])
+        xnd_math_img = {"title": "Xanadu (.xnd) Mathematical Logo", "image": "/static/mathematical.png", "source": "xanadu.xnd"}
+        xnd_imgs = [xnd_logo_img, xnd_math_img]
+        xnd_urls = {"/static/logo.png", "/static/mathematical.png"}
+        out = (xnd_imgs if not is_founder_q else []) + [im for im in out if im.get("image") not in xnd_urls] + (xnd_imgs if is_founder_q else [])
         if knowledge_card and not knowledge_card.get("image"):
             knowledge_card["image"] = "/static/logo.png"
     return out
@@ -4736,9 +4920,11 @@ def register_domain(req: DomainRegisterRequest, request: Request) -> dict[str, A
         blob_txt = store.get_blob(res.get("sha256", "")) or ""
         vnum = int(res["version"])
         if dom and pub_hex and res.get("signature") and blob_txt:
-            accepted = announce_doc_nostr(dom, vnum, dom, res["sha256"], pub_hex, res["signature"], blob_txt, True)
-            if accepted > 0:
-                _NOSTR_CONFIRMED_VERSIONS[dom] = vnum
+            threading.Thread(
+                target=announce_doc_nostr,
+                args=(dom, vnum, dom, res["sha256"], pub_hex, res["signature"], blob_txt, True),
+                daemon=True,
+            ).start()
     except Exception:
         pass
     return {
@@ -4963,8 +5149,12 @@ def api_github_deploy(req: GitHubDeployRequest, request: Request) -> dict[str, A
         "files_count": len(files),
         "auto_sync": True,
     }
+    sha = ""
     try:
         sha = gh_hosting.get_latest_commit_sha(req.repo, used_branch)
+    except Exception:
+        pass
+    try:
         gh_hosting.save_link(dom, req.repo, used_branch, req.subdir, sha)
     except Exception:
         pass
@@ -5264,6 +5454,8 @@ def sync_manifest() -> dict[str, Any]:
         "label": os.environ.get("XND_NODE_LABEL", "Xanadu Desktop"),
         "has_wan": _check_has_wan(),
         "share_gateway": _SHARE_GATEWAY,
+        "seed_node": bool(_SHARE_GATEWAY and _check_has_wan()),
+        "dht_k": 3,
         "domains": dom_map,
         "mesh_bytes": store.get_cache_bytes(),
         "mesh_quota_bytes": MAX_CACHE_BYTES,
@@ -5471,7 +5663,50 @@ def _collision_alias(domain: str, pub_hex: str) -> str:
     return _canonical_domain_for(domain, pub_hex)
 
 
+MIN_VALID_DOMAIN_TS = 1_577_836_800.0  # 2020-01-01T00:00:00Z
+
+
+def _archive_displaced_local_domain(domain: str, dom_rec: dict[str, Any], versions: list[dict[str, Any]]) -> None:
+    """Safely archive an offline-created local domain before yielding its public name."""
+    try:
+        pub = str(dom_rec.get("pubkey_hex") or "")[:8] or "local"
+        arch_dir = DATA_DIR / "state" / "conflict_archive"
+        arch_dir.mkdir(parents=True, exist_ok=True)
+        arch_path = arch_dir / f"{domain}.{pub}.json"
+        blobs = {}
+        for ev in versions:
+            sha = str(ev.get("sha256") or "")
+            if sha and sha not in blobs:
+                txt = store.get_blob(sha)
+                if txt is not None:
+                    blobs[sha] = txt
+        payload = {
+            "domain": domain,
+            "archived_at": time.time(),
+            "domain_record": dom_rec,
+            "versions": versions,
+            "blobs": blobs,
+        }
+        arch_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _purge_collision_aliases() -> int:
+    """Erase any legacy ~pubkey collision aliases from the local store and trust conflicts."""
+    removed = 0
+    for dom_name in [d for d in list(store.domains.keys()) if "~" in d]:
+        if store.delete_domain(dom_name):
+            removed += 1
+    if trust_store.conflicts:
+        with trust_store._lock:
+            trust_store.conflicts.clear()
+            trust_store._save()
+    return removed
+
+
 def import_sync_bundle(bundle: dict[str, Any], ignore_follow_filter: bool = False) -> dict[str, int]:
+    _purge_collision_aliases()
     blobs_map = {b["sha256"]: b["content"] for b in bundle.get("blobs", [])}
     pubkeys_map = {d["name"]: d["pubkey_hex"] for d in bundle.get("domains", [])}
     domain_alias: dict[str, str] = {}
@@ -5479,39 +5714,90 @@ def import_sync_bundle(bundle: dict[str, Any], ignore_follow_filter: bool = Fals
     rejected = 0
 
     for d in bundle.get("domains", []):
-        raw_name = d["name"]
+        raw_name = str(d.get("name") or "").strip().lower()
+        if not raw_name or "~" in raw_name:
+            rejected += 1
+            continue
         in_pub = (d.get("pubkey_hex") or "").strip().lower()
         if raw_name in store.blocked_domains or (in_pub and in_pub in store.blocked_pubkeys) or blocklist_mgr.is_blocked(raw_name, in_pub):
             continue
         if not ignore_follow_filter and store.followed_pubkeys and in_pub and in_pub not in store.followed_pubkeys and raw_name not in store.domains:
             continue
         pinned_pub = trust_store.get_pinned_pubkey(raw_name)
+        pin_source = trust_store.get_pin_source(raw_name)
         existing = store.domains.get(raw_name)
         expected_pub = pinned_pub or ((existing.get("pubkey_hex") or "").strip().lower() if existing else "")
+        in_ts = float(d.get("nostr_ts") or d.get("created_at") or 0.0)
+        ex_ts = float((existing or {}).get("nostr_ts") or (existing or {}).get("created_at") or 0.0)
+        in_verified = bool(d.get("verified_ts") or d.get("nostr_ts"))
+        ex_verified = bool((existing or {}).get("verified_ts") or (existing or {}).get("nostr_ts"))
+        locally_owned = bool(existing and existing.get("privkey_hex"))
 
         if expected_pub and in_pub and expected_pub != in_pub:
-            alias = _collision_alias(raw_name, in_pub)
-            domain_alias[raw_name] = alias
-            trust_store.record_conflict(raw_name, alias, in_pub)
-            if alias not in store.domains:
-                store.domains[alias] = {"name": alias, "pubkey_hex": in_pub, "privkey_hex": "", "created_at": d.get("created_at", time.time())}
+            # Earliest verified registration wins:
+            # - Reject spoofed pre-2020 timestamps.
+            # - Displacing a verified or locally-owned domain requires a verified (e.g. Nostr) timestamp.
+            can_displace = (
+                pin_source != "manual"
+                and in_ts >= MIN_VALID_DOMAIN_TS
+                and ex_ts > 0
+                and (in_ts + 60.0) < ex_ts
+                and (in_verified or (not ex_verified and not locally_owned))
+            )
+            if can_displace:
+                if locally_owned and existing is not None:
+                    _archive_displaced_local_domain(raw_name, dict(existing), list(store.versions.get(raw_name, [])))
+                store.delete_domain(raw_name)
+                store.domains[raw_name] = {
+                    "name": raw_name,
+                    "pubkey_hex": in_pub,
+                    "privkey_hex": "",
+                    "created_at": in_ts,
+                    "nostr_ts": float(d.get("nostr_ts") or 0.0),
+                    "verified_ts": in_verified,
+                }
+                trust_store.set_pin(raw_name, in_pub, source="consensus_earliest")
+                domain_alias[raw_name] = raw_name
+            else:
+                # Losing duplicate/alias: drop cleanly instead of creating ~pubkey aliases.
+                domain_alias[raw_name] = ""
+                rejected += 1
         elif existing is None:
-            store.domains[raw_name] = {"name": raw_name, "pubkey_hex": in_pub, "privkey_hex": "", "created_at": d.get("created_at", time.time())}
+            store.domains[raw_name] = {
+                "name": raw_name,
+                "pubkey_hex": in_pub,
+                "privkey_hex": "",
+                "created_at": in_ts if in_ts >= MIN_VALID_DOMAIN_TS else time.time(),
+                "nostr_ts": float(d.get("nostr_ts") or 0.0),
+                "verified_ts": in_verified,
+            }
             if in_pub:
                 trust_store.ensure_first_seen(raw_name, in_pub, "first_seen")
             domain_alias[raw_name] = raw_name
         elif not existing.get("pubkey_hex") and in_pub:
             existing["pubkey_hex"] = in_pub
+            if in_verified:
+                existing["verified_ts"] = True
+                existing["nostr_ts"] = float(d.get("nostr_ts") or in_ts)
             trust_store.ensure_first_seen(raw_name, in_pub, "first_seen")
             domain_alias[raw_name] = raw_name
         else:
+            if in_verified and existing is not None and not existing.get("verified_ts"):
+                existing["verified_ts"] = True
+                existing["nostr_ts"] = float(d.get("nostr_ts") or in_ts)
             if in_pub:
                 trust_store.ensure_first_seen(raw_name, in_pub, "first_seen")
             domain_alias[raw_name] = raw_name
 
     for v in (bundle.get("versions") or [])[:abuse_guard.MAX_BUNDLE_VERSIONS]:
-        orig_domain, sha = v["domain"], v["sha256"]
+        orig_domain, sha = str(v.get("domain") or "").strip().lower(), v["sha256"]
+        if not orig_domain or "~" in orig_domain:
+            rejected += 1
+            continue
         target_domain = domain_alias.get(orig_domain, orig_domain)
+        if not target_domain or "~" in target_domain:
+            rejected += 1
+            continue
         content = blobs_map.get(sha)
         pub_hex = store.domains.get(target_domain, {}).get("pubkey_hex") or pubkeys_map.get(orig_domain, "") or v.get("pubkey_hex", "")
         if (
@@ -5546,6 +5832,7 @@ def import_sync_bundle(bundle: dict[str, Any], ignore_follow_filter: bool = Fals
         v_copy["title"] = v_copy.get("title") or target_domain
         if store.append_version(v_copy, content, pinned=False):
             imported_versions += 1
+            _notify_domain_updated(target_domain, ver_num)
 
     for a in bundle.get("assets", []):
         try:
@@ -5909,6 +6196,74 @@ def p2p_join(req: P2PJoinRequest) -> dict[str, Any]:
         except Exception:
             pass
     return {"ok": True, "announced_relays": relays_accepted, "discovered": len(disc["discovered"]), "synced_peers": synced}
+
+
+@app.get("/api/dht/find")
+def dht_find_domain(domain: str = Query(default="")) -> dict[str, Any]:
+    clean = normalize_xnd_domain(domain, append_tld=True)
+    if not clean:
+        raise HTTPException(status_code=400, detail="Missing domain")
+    if clean in store.domains and store.versions.get(clean):
+        return {"ok": True, "found": True, "domain": clean, "bundle": export_domain_bundle(clean)}
+    self_set = _self_urls()
+    candidates: list[dict[str, Any]] = []
+    seen_u: set[str] = set()
+    for u, rec in list(_LAN_PEERS.items()):
+        bu = u.rstrip("/")
+        if bu and bu not in self_set and bu not in seen_u:
+            seen_u.add(bu)
+            candidates.append({"url": bu, "label": rec.get("label", "LAN Peer"), "dist": _dht_distance(bu, clean)})
+    for s in _load_seeds():
+        bu = str(s.get("url", "")).rstrip("/")
+        if bu and bu not in self_set and bu not in seen_u:
+            seen_u.add(bu)
+            candidates.append({"url": bu, "label": s.get("label", "Seed Node"), "dist": _dht_distance(bu, clean)})
+    for p in list(store.peers.values()):
+        bu = str(p.get("url", "")).rstrip("/")
+        if bu and bu not in self_set and bu not in seen_u:
+            seen_u.add(bu)
+            candidates.append({"url": bu, "label": p.get("label", "Peer"), "dist": _dht_distance(bu, clean)})
+    candidates.sort(key=lambda x: x["dist"])
+    closest = [{"url": c["url"], "label": c["label"]} for c in candidates[:6]]
+    return {"ok": True, "found": False, "domain": clean, "closest_peers": closest}
+
+
+@app.get("/api/consensus/{domain}")
+def get_domain_consensus(domain: str) -> dict[str, Any]:
+    clean = normalize_xnd_domain(domain, append_tld=True)
+    dom_obj = store.domains.get(clean)
+    pub = (dom_obj or {}).get("pubkey_hex", "") or trust_store.get_pinned_pubkey(clean)
+    return {
+        "ok": True,
+        "domain": clean,
+        "pubkey_hex": pub,
+        "canonical_domain": _canonical_domain_for(clean, pub) if pub else clean,
+        "pin_source": trust_store.get_pin_source(clean) or ("self" if (dom_obj or {}).get("privkey_hex") else "first_seen"),
+        "created_at": float((dom_obj or {}).get("created_at") or 0.0),
+        "policy": "earliest_claim_with_petname",
+        "conflicts": trust_store.get_conflicts(clean),
+    }
+
+
+@app.get("/api/seeds")
+def get_seeds() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "self_seed_active": bool(_SHARE_GATEWAY and _check_has_wan()),
+        "seeds": _load_seeds(),
+    }
+
+
+@app.post("/api/seeds")
+async def add_seed(request: Request) -> dict[str, Any]:
+    _require_localhost(request)
+    body = await request.json()
+    url = str((body or {}).get("url") or "").strip().rstrip("/")
+    label = str((body or {}).get("label") or "Community Seed").strip()[:48]
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Seed URL must start with http:// or https://")
+    _remember_seed(url, label)
+    return {"ok": True, "seeds": _load_seeds()}
 
 
 if __name__ == "__main__":
