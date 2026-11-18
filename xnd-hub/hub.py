@@ -55,7 +55,7 @@ import crdt_sync
 import deep_search
 import e2ee_spaces
 from services import capsule_sandbox
-from routers import ai_mcp, github_routes, moderation, user_data
+from routers import ai_mcp, github_routes, home_commons, moderation, user_data
 import transclusion_engine
 from peer_store import MAX_CACHE_BYTES, PeerStore
 from github_hosting import GitHubHosting
@@ -353,15 +353,72 @@ def _require_capsule_token(request: Request, domain: str) -> None:
         raise HTTPException(status_code=403, detail="Missing capsule capability token (X-Xnd-Cap-Token)")
 
 
+_MAX_BODY_BYTES = max(65536, int(os.environ.get("XND_MAX_BODY_BYTES", str(16 * 1024 * 1024))))
+_TRUSTED_PROXIES = {p.strip() for p in os.environ.get("XND_TRUSTED_PROXY", "").split(",") if p.strip()}
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", "testserver"})
+
+
 @app.middleware("http")
 async def _capsule_isolation_middleware(request: Request, call_next: Any) -> Response:
     path = request.url.path
     origin = (request.headers.get("origin") or "").strip()
     referer = (request.headers.get("referer") or "").strip().lower()
+    peer_ip = request.client.host if request.client else "127.0.0.1"
 
+    # 1. Global request body size limit (mitigates RAM exhaustion)
+    cl_raw = request.headers.get("content-length")
+    if cl_raw:
+        try:
+            if int(cl_raw) > _MAX_BODY_BYTES:
+                return Response(
+                    content=json.dumps({"detail": "Request body exceeds maximum allowed size"}),
+                    status_code=413,
+                    media_type="application/json",
+                )
+        except ValueError:
+            return Response(
+                content=json.dumps({"detail": "Invalid Content-Length header"}),
+                status_code=400,
+                media_type="application/json",
+            )
+
+    # 2. DNS rebinding guard on loopback connections
+    if peer_ip in ("127.0.0.1", "::1") and os.environ.get("XND_ALLOW_ANY_HOST", "0") != "1":
+        raw_host = (request.headers.get("host") or "").strip().lower()
+        if raw_host:
+            host_only = raw_host.split("]")[0] + "]" if raw_host.startswith("[") else raw_host.split(":")[0]
+            if host_only not in _LOCAL_HOSTS:
+                return Response(
+                    content=json.dumps({"detail": "Blocked: invalid Host header for localhost node"}),
+                    status_code=403,
+                    media_type="application/json",
+                )
+
+    # 3. Localhost CSRF guard: block text/plain & non-local Origins on state-changing /api/* calls
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and path.startswith("/api/"):
+        ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if ctype in ("text/plain", "application/x-www-form-urlencoded"):
+            return Response(
+                content=json.dumps({"detail": "Blocked: CSRF-unsafe Content-Type on /api/*"}),
+                status_code=415,
+                media_type="application/json",
+            )
+        if origin and origin.lower() != "null":
+            orig_host = (urllib.parse.urlparse(origin).hostname or "").lower()
+            if orig_host not in ("127.0.0.1", "localhost", "::1"):
+                return Response(
+                    content=json.dumps({"detail": "Blocked: cross-origin state-changing request"}),
+                    status_code=403,
+                    media_type="application/json",
+                )
+
+    # 4. Rate limiting (only trust X-Forwarded-For from configured trusted proxies)
     if not path.startswith("/static/") and os.environ.get("XND_RATE_LIMIT", "1") != "0":
-        xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-        client_ip = xff or (request.client.host if request.client else "127.0.0.1")
+        if peer_ip in _TRUSTED_PROXIES:
+            xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+            client_ip = xff or peer_ip
+        else:
+            client_ip = peer_ip
         if client_ip not in ("127.0.0.1", "::1", "testclient") or os.environ.get("XND_RATE_LOCALHOST", "0") == "1":
             ok_rate, retry_after = ip_limiter.allow(client_ip)
             if not ok_rate:
@@ -410,6 +467,12 @@ async def _capsule_isolation_middleware(request: Request, call_next: Any) -> Res
         response.headers["Access-Control-Allow-Origin"] = "null" if origin.lower() == "null" else "*"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Xnd-Cap-Token"
         response.headers["Vary"] = "Origin"
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=()")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if not path.startswith("/xnd-app/") and not path.startswith("/api/www"):
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     return response
 
 
@@ -574,23 +637,54 @@ def _find_lan_gateway() -> dict[str, Any] | None:
     return None
 
 
+def _is_disallowed_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return bool(
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_reserved
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+    )
+
+
 def _is_safe_public_url(url: str) -> bool:
     try:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             return False
         host = parsed.hostname.lower()
-        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith(".local"):
+        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith((".local", ".internal")):
             return False
         try:
-            ip = ipaddress.ip_address(host)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            if _is_disallowed_ip(ipaddress.ip_address(host)):
                 return False
+            return True
         except ValueError:
             pass
+        # Resolve DNS to prevent DNS-based SSRF (e.g. 127.0.0.1.nip.io)
+        infos = socket.getaddrinfo(host, None)
+        if not infos:
+            return False
+        for info in infos:
+            addr = str(info[4][0]).split("%")[0]
+            if _is_disallowed_ip(ipaddress.ip_address(addr)):
+                return False
         return True
     except Exception:
         return False
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> urllib.request.Request | None:
+        if not _is_safe_public_url(newurl):
+            raise urllib.error.URLError(f"Blocked unsafe SSRF redirect target: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_urlopen(req: urllib.request.Request, timeout: float = 10.0) -> Any:
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    return opener.open(req, timeout=timeout)
 
 
 def _dht_distance(node_id: str, key: str) -> int:
@@ -4612,6 +4706,8 @@ def proxy_live_www(url: str = Query(...)) -> Response:
     parsed = urllib.parse.urlparse(target)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Invalid HTTP/HTTPS URL")
+    if not _is_safe_public_url(target):
+        raise HTTPException(status_code=403, detail="Blocked: private or internal SSRF target")
 
     req = urllib.request.Request(
         target,
@@ -4622,7 +4718,7 @@ def proxy_live_www(url: str = Query(...)) -> Response:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        with _safe_urlopen(req, timeout=12) as resp:
             effective_url = resp.geturl() or target
             ctype = resp.headers.get("Content-Type", "text/html; charset=utf-8")
             raw_bytes = resp.read(2_000_000)
@@ -4676,6 +4772,8 @@ def archive_web_url(req: ArchiveUrlRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="URL is required")
     if not (url.startswith("http://") or url.startswith("https://")):
         url = "https://" + url
+    if not _is_safe_public_url(url):
+        raise HTTPException(status_code=403, detail="Blocked: private or internal SSRF target")
     try:
         request = urllib.request.Request(
             url,
@@ -4684,7 +4782,7 @@ def archive_web_url(req: ArchiveUrlRequest) -> dict[str, Any]:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
         )
-        with urllib.request.urlopen(request, timeout=10) as resp:
+        with _safe_urlopen(request, timeout=10) as resp:
             raw_html = resp.read(512_000).decode("utf-8", errors="replace")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {exc}")
@@ -4746,7 +4844,15 @@ def serve_asset(sha256: str) -> Response:
     res = store.get_asset(sha256.strip().lower())
     if res is None:
         raise HTTPException(status_code=404, detail="Asset not found")
-    return Response(content=res[1], media_type=res[0], headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    return Response(
+        content=res[1],
+        media_type=res[0],
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "Content-Security-Policy": "sandbox",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 def export_domain_bundle(domain: str) -> dict[str, Any]:
@@ -5517,7 +5623,7 @@ async def add_seed(request: Request) -> dict[str, Any]:
 
 
 _hub_self = sys.modules[__name__]
-for _router_mod in (user_data, moderation, github_routes, ai_mcp):
+for _router_mod in (user_data, moderation, github_routes, ai_mcp, home_commons):
     app.include_router(_router_mod.create_router(_hub_self))
 
 if __name__ == "__main__":

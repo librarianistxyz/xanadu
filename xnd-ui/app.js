@@ -275,9 +275,18 @@ function switchTab(tabId) {
   closeSplit();
   const target = tabs.find((x) => x.id === tabId);
   if (!target) return;
+  const cur = tabs.find((x) => x.id === activeTabId);
+  if (cur) {
+    const modes = ["in-dashboard", "in-site-view", "in-search-view", "in-doc-view"];
+    cur.viewMode = modes.find((m) => document.body.classList.contains(m)) || "";
+  }
   activeTabId = tabId;
   for (const t of tabs) {
     t.el.classList.toggle("hidden", t.id !== tabId);
+  }
+  document.body.classList.remove("in-dashboard", "in-site-view", "in-search-view", "in-doc-view");
+  if (target.viewMode) {
+    document.body.classList.add(target.viewMode);
   }
   primaryContent = target.el;
   omniboxInput.value = target.omniboxValue || "";
@@ -369,6 +378,8 @@ function formatTextSegment(text) {
 }
 
 let homeNewsTimer = null;
+let homeRotationClockTimer = null;
+let homeEventSource = null;
 let homeNewsHover = false;
 let homeStoriesPool = [];
 
@@ -376,6 +387,14 @@ function stopHomeNewsRotation() {
   if (homeNewsTimer) {
     clearInterval(homeNewsTimer);
     homeNewsTimer = null;
+  }
+  if (homeRotationClockTimer) {
+    clearInterval(homeRotationClockTimer);
+    homeRotationClockTimer = null;
+  }
+  if (homeEventSource) {
+    try { homeEventSource.close(); } catch (_) {}
+    homeEventSource = null;
   }
 }
 
@@ -388,28 +407,54 @@ function shuffleArray(arr) {
   return copy;
 }
 
-function renderNewsCardsAnimated(stories) {
+function openRandomCommonsSite() {
+  if (!homeStoriesPool || !homeStoriesPool.length) return;
+  const pick = homeStoriesPool[Math.floor(Math.random() * homeStoriesPool.length)];
+  if (pick && pick.domain) openDomain(pick.domain);
+}
+
+async function toggleFollowFromCommons(pubHex, btnEl, event) {
+  if (event) event.stopPropagation();
+  if (!pubHex) return;
+  try {
+    const r = await fetch("/api/moderation/follow", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pubkey_hex: pubHex }),
+    });
+    if (r.ok && btnEl) {
+      const data = await r.json();
+      const followed = (data.followed_pubkeys || []).includes(pubHex.toLowerCase());
+      btnEl.textContent = followed ? "Following" : "Follow";
+      btnEl.classList.toggle("active", followed);
+    }
+  } catch (_) {}
+}
+
+function renderNewsCardsAnimated(items) {
   const grid = document.getElementById("home-news-grid");
   if (!grid) return;
-  const randomized = shuffleArray(stories).slice(0, 12);
+  const slice = shuffleArray(items).slice(0, 12);
   grid.classList.add("news-fading");
   setTimeout(() => {
     const g = document.getElementById("home-news-grid");
     if (!g) return;
-    g.innerHTML = randomized
+    g.innerHTML = slice
       .map(
         (s, idx) => `
-      <article class="news-card news-card-anim" style="animation-delay:${idx * 35}ms;" onclick="openLiveWebsite('${escapeHtml(s.url)}')">
-        ${s.image ? `<img class="news-thumb" src="${window._xndMeshGatewayLabel ? `/api/web/browse?url=${encodeURIComponent(s.image)}` : escapeHtml(s.image)}" alt="" loading="lazy" onerror="this.style.display='none'" />` : ""}
+      <article class="news-card news-card-anim" style="animation-delay:${idx * 35}ms;" onclick="openDomain('${escapeHtml(s.domain)}')">
         <div>
           <div class="news-source">
-            ${escapeHtml(s.source || "World News")}
-            ${s.is_fresh ? `<span class="news-fresh-badge">LIVE · ${escapeHtml(s.published || "1h")}</span>` : ""}
+            <span>${escapeHtml(s.domain)}</span>
+            <span class="news-fresh-badge">${escapeHtml(s.reason || "Verified .xnd")}</span>
           </div>
-          <h3 class="news-headline" style="margin-top:6px;">${escapeHtml(s.title)}</h3>
-          ${s.summary ? `<p class="news-summary">${escapeHtml(s.summary)}</p>` : ""}
+          <h3 class="news-headline" style="margin-top:6px;">${escapeHtml(s.title || s.domain)}</h3>
+          ${s.snippet ? `<p class="news-summary">${escapeHtml(s.snippet)}</p>` : ""}
         </div>
-        <div class="news-meta">${escapeHtml(s.published || "")}</div>
+        <div class="news-meta" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span>${escapeHtml(s.kind === "capsule" ? "App Capsule" : (s.kind === "citation" ? "Citation" : "Document"))}${s.backlinks ? ` · ${s.backlinks} citation${s.backlinks === 1 ? "" : "s"}` : ""}${s.fingerprint ? ` · ${escapeHtml(s.fingerprint)}` : ""}</span>
+          ${s.pubkey_hex ? `<button type="button" class="ver-btn ${s.followed ? "active" : ""}" style="padding:2px 8px;font-size:11px;" onclick="toggleFollowFromCommons('${escapeHtml(s.pubkey_hex)}', this, event)">${s.followed ? "Following" : "Follow"}</button>` : ""}
+        </div>
       </article>`
       )
       .join("");
@@ -417,32 +462,37 @@ function renderNewsCardsAnimated(stories) {
   }, 260);
 }
 
-async function openHomeFeed(category = "top") {
+function _formatRotationCountdown() {
+  const rem = 900 - (Math.floor(Date.now() / 1000) % 900);
+  const m = String(Math.floor(rem / 60)).padStart(2, "0");
+  const s = String(rem % 60).padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+async function openHomeFeed(category = "all") {
   document.body.classList.remove("in-dashboard");
   document.body.classList.remove("in-site-view");
   document.body.classList.remove("in-search-view");
   closeSplit();
   stopHomeNewsRotation();
   document.body.classList.remove("in-doc-view");
-  const cat = (category || "top").toLowerCase();
+  const modeMap = { top: "all", trending: "cited", all: "all", cited: "cited", followed: "followed", capsules: "capsules" };
+  const mode = modeMap[(category || "all").toLowerCase()] || "all";
   setActiveTabMeta({ title: "Xanadu", omniboxValue: "home.xnd", doc: null });
   omniboxInput.value = "";
   currentDoc = null;
   applySmartColorEngine(null);
 
   const cats = [
-    ["top", "Top Stories"],
-    ["trending", "Trending"],
-    ["world", "World"],
-    ["tech", "Technology"],
-    ["sports", "Sports"],
-    ["business", "Business"],
-    ["science", "Science"],
+    ["all", "All Commons"],
+    ["cited", "Most Cited"],
+    ["followed", "Followed Keys"],
+    ["capsules", "App Capsules"],
   ];
   const pillsHtml = cats
     .map(
       ([id, label]) =>
-        `<button class="ver-btn ${id === cat ? "active" : ""}" onclick="openHomeFeed('${id}')">${label}</button>`
+        `<button class="ver-btn ${id === mode ? "active" : ""}" onclick="openHomeFeed('${id}')">${label}</button>`
     )
     .join("");
 
@@ -453,8 +503,8 @@ async function openHomeFeed(category = "top") {
     </div>`;
   primaryContent.innerHTML = `<div class="doc-sheet">
     <div class="doc-header" style="border-bottom:none;padding-bottom:8px;">
-      <h1 class="doc-title" style="font-size:clamp(28px,4vw,38px);margin-bottom:10px;">Xanadu</h1>
-      <div class="news-cats">${pillsHtml}<button class="ver-btn" onclick="renderNewsCardsAnimated(homeStoriesPool)">↻ Shuffle</button></div>
+      <h1 class="doc-title" style="font-size:clamp(28px,4vw,38px);margin-bottom:10px;">Xanadu Commons</h1>
+      <div class="news-cats">${pillsHtml}</div>
     </div>
     <div class="news-grid">${homeSk.repeat(6)}</div>
   </div>`;
@@ -468,29 +518,57 @@ async function openHomeFeed(category = "top") {
         if (!gs.has_wan && gs.active_gateway) window._xndMeshGatewayLabel = gs.active_gateway.label || "LAN Peer";
       }
     } catch (_) {}
-    const res = await fetch(`/api/news?category=${encodeURIComponent(cat)}`);
+    const res = await fetch(`/api/home/commons?mode=${encodeURIComponent(mode)}&limit=30`);
     const data = await res.json();
-    homeStoriesPool = data.stories || [];
+    const baseItems = data.items || [];
+    const citeMixed = (data.latest_citations || []).map((c) => ({
+      domain: c.source_domain,
+      title: `${c.source_domain} -> ${c.target_domain}`,
+      snippet: c.quote ? `"${c.quote}"` : `Span ${c.start}-${c.end}`,
+      kind: "citation",
+      reason: c.reason || `Quoted by ${c.source_domain}`,
+      backlinks: 1,
+      pubkey_hex: "",
+      fingerprint: "",
+    }));
+    homeStoriesPool = [...baseItems, ...citeMixed];
+
+    const gwBadge = window._xndMeshGatewayLabel ? `<span class="news-fresh-badge" style="margin-left:8px;">Mesh Internet via ${escapeHtml(window._xndMeshGatewayLabel)}</span>` : "";
+    const hostSiteBtn = `<button type="button" class="ver-btn" style="display:inline-flex;align-items:center;gap:6px;" onclick="openCloudflareDashboard('', 'register')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Host Free .xnd Site</button>`;
+    const randomBtn = `<button type="button" class="ver-btn" onclick="openRandomCommonsSite()">Random Walk</button>`;
+    const shuffleBtn = `<button type="button" class="ver-btn" onclick="renderNewsCardsAnimated(homeStoriesPool)">Rotate View</button>`;
+    const heartbeatHtml = `<div id="commons-heartbeat" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:4px 0 12px;">
+      <span>${Number(data.lan_peers || 0)} Wi-Fi peer(s)</span>
+      <span>·</span>
+      <span>${homeStoriesPool.length} active items</span>
+      <span>·</span>
+      <span>Next rotation in <strong id="commons-rot-clock" style="color:var(--ink);">${_formatRotationCountdown()}</strong></span>
+      <span id="commons-live-pulse" style="color:var(--accent);font-weight:600;"></span>
+    </div>`;
+
     if (!homeStoriesPool.length) {
       primaryContent.innerHTML = `<div class="doc-sheet">
         <div class="doc-header" style="border-bottom:none;padding-bottom:8px;">
-          <h1 class="doc-title">Xanadu</h1>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+            <h1 class="doc-title" style="font-size:clamp(28px,4vw,38px);margin:0;">Xanadu Commons${gwBadge}</h1>
+            ${hostSiteBtn}
+          </div>
           <div class="news-cats">${pillsHtml}</div>
+          ${heartbeatHtml}
         </div>
-        <p style="color:var(--muted);">No live news stories available right now.</p>
+        <p style="color:var(--muted);">No .xnd sites in this filter yet. Publish a site or sync with peers.</p>
       </div>`;
       return;
     }
 
-    const gwBadge = window._xndMeshGatewayLabel ? `<span class="news-fresh-badge" style="margin-left:8px;">Mesh Internet via ${escapeHtml(window._xndMeshGatewayLabel)}</span>` : "";
-    const hostSiteBtn = `<button type="button" class="ver-btn" style="display:inline-flex;align-items:center;gap:6px;" onclick="openCloudflareDashboard('', 'register')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Host Free .xnd Site</button>`;
     primaryContent.innerHTML = `<div class="doc-sheet">
       <div class="doc-header" style="border-bottom:none;padding-bottom:8px;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
-          <h1 class="doc-title" style="font-size:clamp(28px,4vw,38px);margin:0;">Xanadu${gwBadge}</h1>
+          <h1 class="doc-title" style="font-size:clamp(28px,4vw,38px);margin:0;">Xanadu Commons${gwBadge}</h1>
           ${hostSiteBtn}
         </div>
-        <div class="news-cats">${pillsHtml}<button class="ver-btn" onclick="renderNewsCardsAnimated(homeStoriesPool)">↻ Shuffle</button></div>
+        <div class="news-cats">${pillsHtml}${randomBtn}${shuffleBtn}</div>
+        ${heartbeatHtml}
       </div>
       <div id="home-news-grid" class="news-grid"></div>
     </div>`;
@@ -502,6 +580,39 @@ async function openHomeFeed(category = "top") {
     }
 
     renderNewsCardsAnimated(homeStoriesPool);
+    homeRotationClockTimer = setInterval(() => {
+      const clk = document.getElementById("commons-rot-clock");
+      if (!clk) {
+        stopHomeNewsRotation();
+        return;
+      }
+      clk.textContent = _formatRotationCountdown();
+    }, 1000);
+
+    try {
+      homeEventSource = new EventSource("/api/events/stream");
+      homeEventSource.addEventListener("domain_updated", (ev) => {
+        try {
+          const payload = JSON.parse(ev.data || "{}");
+          const dom = payload.domain;
+          if (!dom) return;
+          const pulseEl = document.getElementById("commons-live-pulse");
+          if (pulseEl) pulseEl.textContent = `· Just synced: ${dom}`;
+          if (!homeStoriesPool.some((x) => x.domain === dom)) {
+            homeStoriesPool.unshift({
+              domain: dom,
+              title: dom,
+              snippet: "Live update synced from peer mesh",
+              kind: "document",
+              reason: "Just synced live",
+              backlinks: 0,
+            });
+            if (!homeNewsHover) renderNewsCardsAnimated(homeStoriesPool);
+          }
+        } catch (_) {}
+      });
+    } catch (_) {}
+
     homeNewsTimer = setInterval(() => {
       if (!document.getElementById("home-news-grid")) {
         stopHomeNewsRotation();
@@ -510,14 +621,14 @@ async function openHomeFeed(category = "top") {
       if (!homeNewsHover && homeStoriesPool.length > 0) {
         renderNewsCardsAnimated(homeStoriesPool);
       }
-    }, 12000);
+    }, 15000);
   } catch (_) {
     primaryContent.innerHTML = `<div class="doc-sheet">
       <div class="doc-header" style="border-bottom:none;padding-bottom:8px;">
-        <h1 class="doc-title">Xanadu</h1>
+        <h1 class="doc-title">Xanadu Commons</h1>
         <div class="news-cats">${pillsHtml}</div>
       </div>
-      <p style="color:var(--muted);">Could not load live news feed. Try searching above or entering any domain.</p>
+      <p style="color:var(--muted);">Could not load Xanadu Commons. Try searching above or entering any .xnd domain.</p>
     </div>`;
   }
 }
@@ -2003,7 +2114,7 @@ async function syncLanMeshNow() {
 }
 
 async function pullPeerUrl(url) {
-  syncStatus.textContent = `Syncing ${url}...`;
+  syncStatus.textContent = "Syncing...";
   const r = await fetch("/api/peers/pull", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2045,6 +2156,14 @@ document.getElementById("btn-sync-modal").addEventListener("click", async () => 
 document.getElementById("btn-close-sync").addEventListener("click", () =>
   syncModal.classList.add("hidden")
 );
+syncModal.addEventListener("click", (e) => {
+  if (e.target === syncModal) syncModal.classList.add("hidden");
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !syncModal.classList.contains("hidden")) {
+    syncModal.classList.add("hidden");
+  }
+});
 document.getElementById("btn-toggle-gateway")?.addEventListener("click", async () => {
   const btn = document.getElementById("btn-toggle-gateway");
   const nextVal = btn?.dataset.enabled !== "1";

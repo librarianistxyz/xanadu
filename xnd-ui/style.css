@@ -46,12 +46,13 @@ body {
   position: sticky;
   top: 0;
   z-index: 50;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 14px;
   padding: 12px 22px;
   background-color: var(--bg);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.16));
   flex-wrap: wrap;
 }
 
@@ -631,7 +632,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 30;
+  padding: 20px;
+  z-index: 200;
 }
 
 .modal-card {
@@ -749,7 +751,8 @@ body.in-site-view .pane-scroll {
   flex-direction: column;
 }
 
-body.in-site-view #primary-content {
+body.in-site-view #primary-content,
+body.in-site-view .tab-view:not(.hidden) {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -791,6 +794,7 @@ body.in-site-view #primary-content {
 
 /* Multi-Tab Strip */
 .tab-strip {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1215,10 +1219,10 @@ body.in-site-view #primary-content {
   width: 88%;
 }
 
-/* Dashboard Full-Window Mode: Hide Browser Topbar & Tab Strip (Dashboard provides its own topbar + Back button) */
+/* Keep browser topbar and tab strip always accessible in Dashboard mode so users are never trapped */
 body.in-dashboard .topbar,
 body.in-dashboard #tab-strip {
-  display: none !important;
+  display: flex;
 }
 
 /* Mobile-Only Clean Home & Side-Drawer Navigation */

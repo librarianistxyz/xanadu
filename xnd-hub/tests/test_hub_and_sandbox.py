@@ -97,3 +97,9 @@ def test_http_endpoints_smoke() -> None:
     assert tools_resp.status_code == 200
     assert tools_resp.json()["ok"] is True
     assert client.get("/api/github/status").status_code == 200
+    commons_resp = client.get("/api/home/commons?mode=all")
+    assert commons_resp.status_code == 200
+    cdata = commons_resp.json()
+    assert cdata["ok"] is True
+    assert "latest_citations" in cdata
+    assert "items" in cdata

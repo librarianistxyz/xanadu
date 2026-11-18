@@ -45,10 +45,27 @@ for _p in os.environ.get("XND_GATEWAY_BLOCKED_PUBKEYS", "").split(","):
         _GW_BLOCKLIST.blocked_pubkeys.add(_p.strip().lower())
 
 
+_GW_MAX_BODY_BYTES = max(65536, int(os.environ.get("XND_GATEWAY_MAX_BODY_BYTES", str(2 * 1024 * 1024))))
+_GW_TRUSTED_PROXIES = {p.strip() for p in os.environ.get("XND_TRUSTED_PROXY", "").split(",") if p.strip()}
+
+
 @app.middleware("http")
 async def _gateway_rate_limit_middleware(request: Request, call_next: Any) -> Response:
-    xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    client_ip = xff or (request.client.host if request.client else "127.0.0.1")
+    cl_raw = request.headers.get("content-length")
+    if cl_raw:
+        try:
+            if int(cl_raw) > _GW_MAX_BODY_BYTES:
+                return JSONResponse({"detail": "Request body too large"}, status_code=413)
+        except ValueError:
+            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+
+    peer_ip = request.client.host if request.client else "127.0.0.1"
+    if peer_ip in _GW_TRUSTED_PROXIES:
+        xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        client_ip = xff or peer_ip
+    else:
+        client_ip = peer_ip
+
     ok, retry_after = _GW_IP_LIMITER.allow(client_ip)
     if not ok:
         return JSONResponse(
@@ -56,7 +73,13 @@ async def _gateway_rate_limit_middleware(request: Request, call_next: Any) -> Re
             status_code=429,
             headers={"Retry-After": str(retry_after)},
         )
-    return await call_next(request)
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=()")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    return response
 
 
 def _verify_version(domain: str, ver_num: int, sha256_hex: str, pub_hex: str, sig_hex: str, content: str, prev_sha256: str = "") -> bool:

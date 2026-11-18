@@ -1619,6 +1619,14 @@ public class LocalNodeServer {
                 sendJson(out, 200, new JSONObject().put("ok", true).put("known_peers", new JSONArray(peers)).toString());
             } else if (path.equals("/api/nat/status")) {
                 sendJson(out, 200, (natTunnel != null ? natTunnel.status() : new JSONObject().put("ok", false).put("stun_ok", false)).toString());
+            } else if (path.equals("/api/home/commons")) {
+                Map<String, String> qm = parseQuery(query);
+                String modeVal = qm.getOrDefault("mode", "all");
+                int limitVal = 24;
+                if (qm.containsKey("limit")) {
+                    try { limitVal = Math.max(1, Math.min(60, Integer.parseInt(qm.get("limit")))); } catch (Exception ignored) {}
+                }
+                sendJson(out, 200, exportHomeCommons(modeVal, limitVal).toString());
             } else if (path.equals("/api/sync/manifest")) {
                 Map<String, String> qm = parseQuery(query);
                 double sinceVal = 0.0;
@@ -3336,6 +3344,128 @@ public class LocalNodeServer {
             }
         }
         return total;
+    }
+
+    private JSONObject exportHomeCommons(String mode, int limit) {
+        String cleanMode = (mode == null ? "all" : mode.trim().toLowerCase(Locale.US));
+        int cap = Math.max(1, Math.min(60, limit));
+        long nowSec = System.currentTimeMillis() / 1000L;
+        long bucket = nowSec / 900L;
+        int lanCount = lanPeers.size();
+        JSONArray citationsOut = new JSONArray();
+        List<JSONObject> candidates = new ArrayList<>();
+        try {
+            Map<String, String> firstQuoterByTarget = new HashMap<>();
+            Map<String, Integer> blCountByTarget = new HashMap<>();
+            synchronized (docs) {
+                for (Map.Entry<String, JSONObject> e : docs.entrySet()) {
+                    String srcDom = e.getKey();
+                    if (blockedDomains.contains(srcDom)) continue;
+                    JSONObject d = e.getValue();
+                    String raw = d.optString("raw_content", "");
+                    if (raw.isEmpty()) continue;
+                    JSONArray segs = TransclusionEngine.buildSegments(raw, docs);
+                    for (int i = 0; i < segs.length(); i++) {
+                        JSONObject seg = segs.optJSONObject(i);
+                        if (seg == null || !"transclusion".equals(seg.optString("type"))) continue;
+                        String tgtDom = seg.optString("target_domain", "");
+                        if (tgtDom.isEmpty() || blockedDomains.contains(tgtDom)) continue;
+                        blCountByTarget.put(tgtDom, blCountByTarget.getOrDefault(tgtDom, 0) + 1);
+                        if (!firstQuoterByTarget.containsKey(tgtDom)) firstQuoterByTarget.put(tgtDom, srcDom);
+                        if (citationsOut.length() < 10) {
+                            String qTxt = seg.optString("quoted_text", "");
+                            if (qTxt.length() > 180) qTxt = qTxt.substring(0, 180);
+                            citationsOut.put(new JSONObject()
+                                    .put("source_domain", srcDom)
+                                    .put("target_domain", tgtDom)
+                                    .put("start", seg.optInt("target_start", 0))
+                                    .put("end", seg.optInt("target_end", 0))
+                                    .put("quote", qTxt)
+                                    .put("age", "recent")
+                                    .put("reason", "Quoted by " + srcDom));
+                        }
+                    }
+                }
+                for (Map.Entry<String, JSONObject> e : docs.entrySet()) {
+                    String dom = e.getKey();
+                    JSONObject d = e.getValue();
+                    String pub = d.optString("pubkey_hex", d.optString("pubkey", "")).toLowerCase(Locale.US);
+                    if (blockedDomains.contains(dom) || (!pub.isEmpty() && blockedPubkeys.contains(pub))) continue;
+                    String kind = d.optString("kind", d.optBoolean("is_app", false) ? "capsule" : "document");
+                    int bl = blCountByTarget.getOrDefault(dom, 0);
+                    boolean followed = !pub.isEmpty() && followedPubkeys.contains(pub);
+                    if ("cited".equals(cleanMode) && bl == 0) continue;
+                    if ("followed".equals(cleanMode) && !followed) continue;
+                    if ("capsules".equals(cleanMode) && !"capsule".equals(kind)) continue;
+                    long ageSec = Math.max(0L, nowSec - (long) d.optDouble("created_at", nowSec));
+                    String ageStr = ageSec < 60 ? (ageSec + "s") : (ageSec < 3600 ? ((ageSec / 60) + "m") : (ageSec < 86400 ? ((ageSec / 3600) + "h") : ((ageSec / 86400) + "d")));
+                    String reason;
+                    if (bl > 0) {
+                        String q = firstQuoterByTarget.getOrDefault(dom, "peer.xnd");
+                        reason = bl == 1 ? ("Quoted by " + q) : ("Quoted by " + q + " (+" + (bl - 1) + ")");
+                    } else if (followed) {
+                        reason = "Updated " + ageStr + " ago by a key you follow";
+                    } else if (lanCount > 0) {
+                        reason = "Available across " + lanCount + " Wi-Fi peer(s) • " + ageStr;
+                    } else {
+                        reason = "Rotation window • updated " + ageStr + " ago";
+                    }
+                    String rot = TransclusionEngine.sha256Hex(bucket + ":" + dom);
+                    String snip = d.optString("raw_content", "").replaceAll("\\s+", " ").trim();
+                    if (snip.length() > 180) snip = snip.substring(0, 180);
+                    candidates.add(new JSONObject()
+                            .put("domain", dom)
+                            .put("title", d.optString("title", dom))
+                            .put("kind", kind)
+                            .put("version", d.optInt("version_num", d.optInt("version", 1)))
+                            .put("pubkey_hex", pub)
+                            .put("fingerprint", formatFingerprint(pub))
+                            .put("snippet", snip)
+                            .put("backlinks", bl)
+                            .put("followed", followed)
+                            .put("age", ageStr)
+                            .put("reason", reason)
+                            .put("_rot", rot));
+                }
+            }
+            candidates.sort((a, b) -> {
+                if ("cited".equals(cleanMode)) {
+                    int cmp = Integer.compare(b.optInt("backlinks", 0), a.optInt("backlinks", 0));
+                    if (cmp != 0) return cmp;
+                }
+                return a.optString("_rot").compareTo(b.optString("_rot"));
+            });
+            JSONArray itemsOut = new JSONArray();
+            Set<String> seenPubs = new HashSet<>();
+            List<JSONObject> overflow = new ArrayList<>();
+            for (JSONObject c : candidates) {
+                String p = c.optString("pubkey_hex", "");
+                if (!p.isEmpty() && !seenPubs.add(p)) {
+                    overflow.add(c);
+                    continue;
+                }
+                c.remove("_rot");
+                itemsOut.put(c);
+                if (itemsOut.length() >= cap) break;
+            }
+            if (itemsOut.length() < cap) {
+                for (JSONObject c : overflow) {
+                    c.remove("_rot");
+                    itemsOut.put(c);
+                    if (itemsOut.length() >= cap) break;
+                }
+            }
+            return new JSONObject()
+                    .put("ok", true)
+                    .put("mode", cleanMode)
+                    .put("rotation_bucket", bucket)
+                    .put("rotation_interval_sec", 900)
+                    .put("lan_peers", lanCount)
+                    .put("latest_citations", citationsOut)
+                    .put("items", itemsOut);
+        } catch (Exception e) {
+            return new JSONObject();
+        }
     }
 
     private JSONObject exportManifest() {
