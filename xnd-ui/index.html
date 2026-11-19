@@ -41,6 +41,7 @@
       <button id="btn-registry" class="btn-tool">Registry</button>
       <button id="btn-library" class="btn-tool">Library</button>
       <button id="btn-graph-view" class="btn-tool">Graph</button>
+      <button id="btn-timetravel-modal" class="btn-tool" onclick="openTimeTravelModal()">⏱ Time-Travel</button>
       <button id="btn-archive-modal" class="btn-tool">Archive</button>
       <button id="btn-keys-modal" class="btn-tool">Keys</button>
       <button id="btn-sync-modal" class="btn-tool">Sync</button>
@@ -324,6 +325,32 @@
       <div id="sync-peers-list" style="margin-top:10px;max-height:170px;overflow:auto;font-size:12px;"></div>
       <hr style="border:none;border-top:1px solid rgba(128,128,128,0.2);margin:14px 0;" />
       <div>
+        <div style="font-family:var(--font-mono);font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;margin-bottom:6px;">
+          Air-Gapped Sneakernet &amp; Animated QR
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+          <input id="sneaker-domain" type="text" placeholder="Optional domain (e.g. forum.xnd)" style="flex:1;min-width:160px;" />
+          <button type="button" class="btn-tool" style="padding:5px 10px;font-size:12px;" onclick="downloadSneakernetBundle()">⬇ Export .xndbundle</button>
+          <label class="btn-tool" style="padding:5px 10px;font-size:12px;cursor:pointer;">
+            ⬆ Import .xndbundle
+            <input type="file" accept=".xndbundle,.json" style="display:none;" onchange="importSneakernetFile(this)" />
+          </label>
+          <button type="button" class="btn-accent" style="padding:5px 10px;font-size:12px;" onclick="startAnimatedQrSync()">▣ Animated QR</button>
+        </div>
+        <div id="sneaker-usb-row" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
+        <div id="sneaker-qr-stage" class="hidden" style="text-align:center;padding:10px;border:1px dashed rgba(128,128,128,0.35);border-radius:8px;background:#fff;color:#111;">
+          <div id="sneaker-qr-svg" style="max-width:260px;margin:0 auto;"></div>
+          <div id="sneaker-qr-meta" style="font-family:var(--font-mono);font-size:11px;margin-top:6px;"></div>
+          <button type="button" class="btn-ghost" style="font-size:11px;margin-top:4px;color:#111;" onclick="stopAnimatedQrSync()">Stop QR</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:8px;">
+          <input id="sneaker-qr-input" type="text" placeholder="Paste scanned XNDQ1|... QR frame" style="flex:1;font-family:var(--font-mono);font-size:11px;" />
+          <button type="button" class="btn-tool" style="padding:5px 10px;font-size:12px;" onclick="submitScannedQrFrame()">Receive Frame</button>
+        </div>
+        <div id="sneaker-status" style="margin-top:6px;font-family:var(--font-mono);font-size:11px;color:var(--faded-ink);"></div>
+      </div>
+      <hr style="border:none;border-top:1px solid rgba(128,128,128,0.2);margin:14px 0;" />
+      <div>
         <div style="font-family:var(--font-mono);font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;margin-bottom:6px;">Always-On Seed &amp; DHT Relay Nodes</div>
         <div id="sync-seeds-list" style="font-size:12px;color:var(--muted);margin-bottom:8px;">Checking seed nodes...</div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -336,6 +363,30 @@
   </div>
 
   <span id="dl-status" class="status-pill hidden" style="position:fixed;bottom:12px;right:16px;z-index:50;"></span>
+
+  <div id="timetravel-modal" class="modal hidden">
+    <div class="modal-card" style="max-width:760px;">
+      <div class="modal-head">
+        <h2>⏱ Time-Travel Hypertext &amp; Global Blame</h2>
+        <button type="button" class="btn-ghost modal-close-btn" onclick="document.getElementById('timetravel-modal').classList.add('hidden')">✕</button>
+      </div>
+      <div style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:12px;margin-bottom:4px;">
+          <span>Snapshot Date: <strong id="tt-date-label">Latest</strong></span>
+          <span id="tt-counts">0 nodes • 0 edges</span>
+        </div>
+        <input id="tt-slider" type="range" min="0" max="100" value="100" style="width:100%;" oninput="onTimeTravelSlide(this.value)" />
+      </div>
+      <div id="tt-graph-list" style="max-height:240px;overflow:auto;border:1px solid rgba(128,128,128,0.22);border-radius:8px;padding:8px;font-size:12px;"></div>
+      <div style="margin-top:12px;">
+        <div style="display:flex;gap:8px;margin-bottom:6px;">
+          <input id="tt-blame-domain" type="text" placeholder="Inspect domain blame (e.g. manifesto.xnd)" style="flex:1;" />
+          <button type="button" class="btn-accent" onclick="inspectDomainBlame()">Blame</button>
+        </div>
+        <div id="tt-blame-out" style="max-height:160px;overflow:auto;font-family:var(--font-mono);font-size:11px;"></div>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/transclusion.js"></script>
   <script src="/static/app.js"></script>

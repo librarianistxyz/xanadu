@@ -21,16 +21,28 @@
   function renderCard(seg) {
     const hashShort = (seg.target_hash || "").slice(0, 12);
     const verified = seg.hash_verified !== false;
-    const badge = verified
-      ? `<span style="color:#22c55e;font-weight:700;">✓ Provenance Verified</span>`
-      : `<span style="color:#ef4444;font-weight:700;">⚠ Hash Mismatch</span>`;
+    const status = seg.source_status || "unchanged";
+    const authorShort = seg.author_pubkey ? `${String(seg.author_pubkey).slice(0, 12)}...` : "unknown";
+    const latestVer = Number(seg.latest_version || seg.target_version || 1);
+    const targetVer = Number(seg.target_version || 1);
+    const statusBadge =
+      status === "retracted"
+        ? `<span style="color:#ef4444;font-weight:700;">⚠ Retracted (v${latestVer})</span>`
+        : status === "edited"
+          ? `<span style="color:#f59e0b;font-weight:700;">✎ Edited in v${latestVer}</span>`
+          : `<span style="color:#22c55e;font-weight:700;">✓ ${verified ? "Unchanged" : "Hash Mismatch"}</span>`;
+    const blameTip = `Author: ed25519:${authorShort} | Quoted: v${targetVer} | Latest: v${latestVer} | Status: ${status}`;
     return `<span
       id="left-${esc(seg.bridge_id)}"
       class="transclusion-card"
-      title="Click to verify & open Origin Span side-by-side"
-      onclick="window.XndTransclusion.openOriginSplit('${esc(seg.bridge_id)}', '${esc(seg.target_domain)}', ${Number(seg.target_version || 1)}, ${Number(seg.target_start || 0)}, ${Number(seg.target_end || 0)}, '${esc(seg.expected_hash || hashShort)}')"
+      data-author-pub="${esc(seg.author_pubkey || "")}"
+      data-target-ver="${targetVer}"
+      data-latest-ver="${latestVer}"
+      data-source-status="${esc(status)}"
+      title="${esc(blameTip)}"
+      onclick="window.XndTransclusion.openOriginSplit('${esc(seg.bridge_id)}', '${esc(seg.target_domain)}', ${targetVer}, ${Number(seg.target_start || 0)}, ${Number(seg.target_end || 0)}, '${esc(seg.expected_hash || hashShort)}')"
     >
-      <span class="transclusion-meta">⟐ ${esc(seg.target_domain)}@v${Number(seg.target_version || 1)}${hashShort ? `#${esc(hashShort)}` : ""} [${Number(seg.target_start || 0)}:${Number(seg.target_end || 0)}] · ${badge}</span>
+      <span class="transclusion-meta">⟐ ${esc(seg.target_domain)}@v${targetVer}${hashShort ? `#${esc(hashShort)}` : ""} [${Number(seg.target_start || 0)}:${Number(seg.target_end || 0)}] · ed25519:${esc(authorShort)} · ${statusBadge}</span>
       ${esc(seg.quoted_text || "")}
     </span>`;
   }

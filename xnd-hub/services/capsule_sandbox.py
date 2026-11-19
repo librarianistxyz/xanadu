@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import HTTPException
 
 import capsule_runtime
+from services import wasm_sandbox
 
 _CAPSULE_FORBIDDEN_NAMES = frozenset({
     "eval", "exec", "compile", "open", "getattr", "setattr", "delattr",
@@ -157,8 +158,21 @@ def run_capsule_backend(
     method: str = "POST",
     req_path: str = "/",
     req_headers: dict[str, str] | None = None,
+    backend_wasm_b64: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Execute a capsule backend.py in an isolated subprocess with rlimits."""
+    """Execute a capsule backend (WASM if provided, otherwise isolated Python subprocess)."""
+    if (backend_wasm_b64 or "").strip():
+        return wasm_sandbox.run_wasm_capsule(
+            state_dir,
+            backend_wasm_b64,
+            action,
+            payload,
+            state,
+            domain=domain,
+            method=method,
+            req_path=req_path,
+            req_headers=req_headers,
+        )
     if not backend_py.strip():
         return {"ok": True, "state": state}, state
     validate_capsule_ast(backend_py)

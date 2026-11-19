@@ -57,6 +57,7 @@ def build_segments(
     content: str,
     get_version_fn: Callable[[str, int | None], dict[str, Any] | None],
     get_blob_fn: Callable[[str], str | None],
+    get_latest_version_fn: Callable[[str], dict[str, Any] | None] | None = None,
 ) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
     pos = 0
@@ -76,6 +77,17 @@ def build_segments(
             actual_hash = (target_v.get("sha256") or "").lower()
             hash_verified = (not expected_hash) or actual_hash.startswith(expected_hash)
             quoted = t_text[s:e]
+
+            latest_v = get_latest_version_fn(t_domain) if get_latest_version_fn else None
+            latest_ver_num = int(latest_v["version_num"]) if latest_v else int(target_v["version_num"])
+            source_status = "unchanged"
+            if latest_v is not None and int(latest_v["version_num"]) != int(target_v["version_num"]):
+                latest_text = get_blob_fn(latest_v["sha256"]) or ""
+                if not latest_text.strip() or s >= len(latest_text):
+                    source_status = "retracted"
+                elif latest_text[s:e] != quoted:
+                    source_status = "edited"
+
             segments.append(
                 {
                     "type": "transclusion",
@@ -91,6 +103,10 @@ def build_segments(
                     "quoted_text": quoted,
                     "source_start": m.start(),
                     "source_end": m.end(),
+                    "author_pubkey": str(target_v.get("pubkey_hex") or ""),
+                    "author_created_at": float(target_v.get("created_at") or 0.0),
+                    "latest_version": latest_ver_num,
+                    "source_status": source_status,
                 }
             )
         else:

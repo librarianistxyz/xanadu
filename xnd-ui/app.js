@@ -3763,3 +3763,183 @@ if (openParam && openParam.trim()) {
 } else {
   createTab("home.xnd");
 }
+
+let _qrAnimTimer = null;
+
+async function downloadSneakernetBundle() {
+  const dom = (document.getElementById("sneaker-domain")?.value || "").trim();
+  const st = document.getElementById("sneaker-status");
+  if (st) st.textContent = "Packing delta .xndbundle...";
+  try {
+    const r = await fetch("/api/sneakernet/export/file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: dom }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "Export failed");
+    const env = data.envelope;
+    const blob = new Blob([JSON.stringify(env)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${dom || "xanadu-delta"}-${String(env.bundle_sha256 || "").slice(0, 8)}.xndbundle`;
+    a.click();
+    if (st) st.textContent = `Exported ${env.compressed_bytes} bytes (SHA-256: ${String(env.bundle_sha256).slice(0, 12)}...)`;
+  } catch (e) {
+    if (st) st.textContent = `Export error: ${e.message}`;
+  }
+}
+
+async function importSneakernetFile(input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  const st = document.getElementById("sneaker-status");
+  if (st) st.textContent = "Verifying & importing .xndbundle...";
+  try {
+    const text = await file.text();
+    const r = await fetch("/api/sneakernet/import/file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ envelope: JSON.parse(text) }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "Import failed");
+    if (st) st.textContent = `Imported ${data.imported_versions || 0} versions, ${data.imported_forum_posts || 0} forum posts (rejected: ${data.rejected || 0})`;
+  } catch (e) {
+    if (st) st.textContent = `Import error: ${e.message}`;
+  } finally {
+    input.value = "";
+  }
+}
+
+let _ttMinTs = 0;
+let _ttMaxTs = 0;
+
+async function openTimeTravelModal() {
+  const modal = document.getElementById("timetravel-modal");
+  if (modal) modal.classList.remove("hidden");
+  await fetchTimeTravelGraph(null);
+}
+
+async function fetchTimeTravelGraph(ts) {
+  const url = ts == null ? "/api/graph/timetravel" : `/api/graph/timetravel?ts=${encodeURIComponent(ts)}`;
+  const r = await fetch(url);
+  if (!r.ok) return;
+  const data = await r.json();
+  _ttMinTs = Number(data.min_ts || 0);
+  _ttMaxTs = Number(data.max_ts || Date.now() / 1000);
+  const lbl = document.getElementById("tt-date-label");
+  if (lbl) lbl.textContent = new Date(Number(data.ts || _ttMaxTs) * 1000).toLocaleString();
+  const cnt = document.getElementById("tt-counts");
+  if (cnt) cnt.textContent = `${(data.nodes || []).length} nodes • ${(data.edges || []).length} transclusion edges`;
+  const box = document.getElementById("tt-graph-list");
+  if (box) {
+    const nodesHtml = (data.nodes || []).map((n) =>
+      `<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.12);">
+        <strong>${n.id}</strong>@v${n.version} <span style="opacity:0.7;">(${n.kind})</span>
+        <span style="font-family:var(--font-mono);font-size:10px;opacity:0.75;">ed25519:${String(n.pubkey_hex || "").slice(0, 12)}</span>
+      </div>`
+    ).join("");
+    const edgesHtml = (data.edges || []).map((e) =>
+      `<div style="font-family:var(--font-mono);font-size:11px;padding:2px 0;">${e.source} ⟶ ${e.target} ${e.hash_verified ? "✓" : "⚠"}</div>`
+    ).join("");
+    box.innerHTML = nodesHtml + (edgesHtml ? `<div style="margin-top:8px;font-weight:700;">Links at this timestamp:</div>${edgesHtml}` : "");
+  }
+}
+
+let _ttDebounce = null;
+function onTimeTravelSlide(pct) {
+  const ratio = Number(pct) / 100;
+  const targetTs = _ttMinTs + (_ttMaxTs - _ttMinTs) * ratio;
+  clearTimeout(_ttDebounce);
+  _ttDebounce = setTimeout(() => fetchTimeTravelGraph(targetTs), 120);
+}
+
+async function inspectDomainBlame() {
+  const dom = (document.getElementById("tt-blame-domain")?.value || "").trim();
+  const out = document.getElementById("tt-blame-out");
+  if (!dom || !out) return;
+  const r = await fetch(`/api/blame/${encodeURIComponent(dom)}`);
+  const data = await r.json();
+  if (!r.ok) {
+    out.textContent = data.detail || "Not found";
+    return;
+  }
+  const quotes = (data.segments || []).filter((s) => s.type === "transclusion");
+  if (!quotes.length) {
+    out.textContent = `${dom}@v${data.version} has no transcluded quotes.`;
+    return;
+  }
+  out.innerHTML = quotes.map((q) =>
+    `<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.15);">
+      [${q.target_domain}@v${q.target_version} -> latest v${q.latest_version}]
+      <strong>${q.source_status}</strong> · ed25519:${String(q.author_pubkey || "").slice(0, 12)}
+    </div>`
+  ).join("");
+}
+
+function stopAnimatedQrSync() {
+  if (_qrAnimTimer) {
+    clearInterval(_qrAnimTimer);
+    _qrAnimTimer = null;
+  }
+  const stage = document.getElementById("sneaker-qr-stage");
+  if (stage) stage.classList.add("hidden");
+}
+
+async function startAnimatedQrSync() {
+  stopAnimatedQrSync();
+  const dom = (document.getElementById("sneaker-domain")?.value || "").trim();
+  const st = document.getElementById("sneaker-status");
+  if (st) st.textContent = "Encoding animated QR frames...";
+  try {
+    const r = await fetch("/api/sneakernet/qr/encode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: dom, include_svg: true }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "QR encode failed");
+    const svgs = data.svgs || [];
+    if (!svgs.length) throw new Error("No QR frames generated");
+    const stage = document.getElementById("sneaker-qr-stage");
+    const svgBox = document.getElementById("sneaker-qr-svg");
+    const meta = document.getElementById("sneaker-qr-meta");
+    if (stage) stage.classList.remove("hidden");
+    let idx = 0;
+    const render = () => {
+      if (svgBox) svgBox.innerHTML = svgs[idx];
+      if (meta) meta.textContent = `Transfer ${data.transfer_id} • Frame ${idx + 1} / ${svgs.length} (${data.compressed_bytes} B)`;
+      idx = (idx + 1) % svgs.length;
+    };
+    render();
+    if (svgs.length > 1) _qrAnimTimer = setInterval(render, 450);
+    if (st) st.textContent = `Streaming ${svgs.length} QR frame(s). Scan with receiver.`;
+  } catch (e) {
+    if (st) st.textContent = `QR encode error: ${e.message}`;
+  }
+}
+
+async function submitScannedQrFrame() {
+  const inp = document.getElementById("sneaker-qr-input");
+  const frame = (inp?.value || "").trim();
+  if (!frame) return;
+  const st = document.getElementById("sneaker-status");
+  try {
+    const r = await fetch("/api/sneakernet/qr/receive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frame }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "QR receive failed");
+    if (data.complete) {
+      if (st) st.textContent = `QR Sync Complete! Imported ${data.imported_versions || 0} versions.`;
+    } else {
+      if (st) st.textContent = `QR Progress: ${data.received}/${data.total} frames (missing: ${(data.missing || []).join(",")})`;
+    }
+    if (inp) inp.value = "";
+  } catch (e) {
+    if (st) st.textContent = `QR receive error: ${e.message}`;
+  }
+}

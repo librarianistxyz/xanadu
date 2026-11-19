@@ -54,8 +54,8 @@ import capsule_runtime
 import crdt_sync
 import deep_search
 import e2ee_spaces
-from services import capsule_sandbox
-from routers import ai_mcp, github_routes, home_commons, moderation, user_data
+from services import capsule_sandbox, hardware_vault, wasm_sandbox
+from routers import ai_mcp, github_routes, hardware_auth, home_commons, moderation, sneakernet, time_travel, trust_mesh, user_data
 import transclusion_engine
 from peer_store import MAX_CACHE_BYTES, PeerStore
 from github_hosting import GitHubHosting
@@ -915,6 +915,7 @@ def publish_document(
     bypass_short_rule: bool = False,
     pinned: bool = True,
     privkey_hex: str = "",
+    hardware_signature_hex: str = "",
 ) -> dict[str, Any]:
     domain = normalize_xnd_domain(domain, append_tld=True)
     if not DOMAIN_RE.match(domain) or len(domain) > 253:
@@ -924,7 +925,13 @@ def publish_document(
         raise HTTPException(status_code=413, detail=f"Document exceeds max blob size ({sz_bytes} > {abuse_guard.MAX_BLOB_BYTES} bytes)")
 
     now = time.time()
-    pub_hex, priv_hex = _ensure_domain_keys(domain, claim_token, bypass_short_rule, privkey_hex)
+    hw_gated = hardware_vault.is_hardware_gated(DATA_DIR / "state", domain)
+    if hw_gated:
+        enrolled = hardware_vault.get_enrolled_signer(DATA_DIR / "state", domain)
+        pub_hex = enrolled["pubkey_hex"]
+        priv_hex = ""
+    else:
+        pub_hex, priv_hex = _ensure_domain_keys(domain, claim_token, bypass_short_rule, privkey_hex)
     if not bypass_short_rule:
         ok_pk, retry_pk = pubkey_limiter.allow(pub_hex)
         if not ok_pk:
@@ -934,7 +941,13 @@ def publish_document(
     prev_sha256 = str(vers[-1]["sha256"]) if vers else ""
 
     sha256 = rust_sha256(content)
-    sig_hex = sign_payload(priv_hex, domain, next_ver, sha256, prev_sha256)
+    if hw_gated:
+        sig_hex = hardware_signature_hex.strip().lower()
+        hardware_vault.verify_hardware_publish_signature(
+            DATA_DIR / "state", domain, next_ver, sha256, prev_sha256, sig_hex
+        )
+    else:
+        sig_hex = sign_payload(priv_hex, domain, next_ver, sha256, prev_sha256)
     header = {
         "domain": domain,
         "version_num": next_ver,
@@ -984,6 +997,7 @@ def publish_capsule(
     bypass_short_rule: bool = False,
     privkey_hex: str = "",
     connect_origins: list[str] | None = None,
+    backend_wasm_b64: str = "",
 ) -> dict[str, Any]:
     domain = normalize_xnd_domain(domain, append_tld=True)
     if not DOMAIN_RE.match(domain) or len(domain) > 253:
@@ -1008,7 +1022,12 @@ def publish_capsule(
                 except Exception:
                     pass
     clean_origins = _sanitize_connect_origins(raw_origins)
+    clean_wasm_b64 = (backend_wasm_b64 or "").strip()
+    if clean_wasm_b64:
+        wasm_sandbox.decode_and_validate_wasm(clean_wasm_b64)
     payload_obj: dict[str, Any] = {"files": files, "backend_py": backend_py}
+    if clean_wasm_b64:
+        payload_obj["backend_wasm_b64"] = clean_wasm_b64
     if clean_origins:
         payload_obj["connect_origins"] = clean_origins
     bundle_payload = json.dumps(payload_obj, sort_keys=True)
@@ -1051,6 +1070,7 @@ def run_capsule_backend(
     method: str = "POST",
     req_path: str = "/",
     req_headers: dict[str, str] | None = None,
+    backend_wasm_b64: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     return capsule_sandbox.run_capsule_backend(
         DATA_DIR / "state",
@@ -1062,6 +1082,7 @@ def run_capsule_backend(
         method=method,
         req_path=req_path,
         req_headers=req_headers,
+        backend_wasm_b64=backend_wasm_b64,
     )
 
 
@@ -1447,7 +1468,12 @@ def _founder_knowledge_card(query: str = "") -> dict[str, Any]:
 
 
 def build_segments(content: str) -> list[dict[str, Any]]:
-    return transclusion_engine.build_segments(content, store.get_version, store.get_blob)
+    return transclusion_engine.build_segments(
+        content,
+        store.get_version,
+        store.get_blob,
+        get_latest_version_fn=lambda d: store.get_version(d, None),
+    )
 
 
 class PublishRequest(BaseModel):
@@ -1456,6 +1482,7 @@ class PublishRequest(BaseModel):
     content: str
     claim_token: str = ""
     privkey_hex: str = ""
+    hardware_signature_hex: str = ""
     private_space: bool = False
     allowed_pubkeys: list[str] | str = ""
 
@@ -4183,7 +4210,7 @@ def api_publish(req: PublishRequest) -> dict[str, Any]:
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"E2EE encryption failed: {e}")
 
-    res = {"ok": True, **publish_document(req.domain, req.title, content_to_publish, req.claim_token, pinned=True, privkey_hex=effective_priv)}
+    res = {"ok": True, **publish_document(req.domain, req.title, content_to_publish, req.claim_token, pinned=True, privkey_hex=effective_priv, hardware_signature_hex=req.hardware_signature_hex)}
     dom = res.get("domain", "")
     if int(res.get("version_num", res.get("version", 0))) == 1:
         priv_hex = store.domains.get(dom, {}).get("privkey_hex", "")
@@ -4598,6 +4625,11 @@ async def rotate_domain_key(domain: str, request: Request) -> dict[str, Any]:
     dom = normalize_xnd_domain(domain, append_tld=True)
     if not DOMAIN_RE.match(dom) or len(dom) > 253:
         raise HTTPException(status_code=400, detail="Invalid .xnd domain.")
+    if hardware_vault.is_hardware_gated(DATA_DIR / "state", dom):
+        raise HTTPException(
+            status_code=403,
+            detail="Domain is hardware-gated; use /api/hardware-vault/rotate with a signed challenge",
+        )
     existing = store.domains.get(dom)
     if existing is None:
         raise HTTPException(status_code=404, detail="Domain not found")
@@ -5623,7 +5655,7 @@ async def add_seed(request: Request) -> dict[str, Any]:
 
 
 _hub_self = sys.modules[__name__]
-for _router_mod in (user_data, moderation, github_routes, ai_mcp, home_commons):
+for _router_mod in (user_data, moderation, github_routes, ai_mcp, home_commons, sneakernet, time_travel, hardware_auth, trust_mesh):
     app.include_router(_router_mod.create_router(_hub_self))
 
 if __name__ == "__main__":
